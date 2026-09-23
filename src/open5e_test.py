@@ -1,10 +1,21 @@
 import requests
 
 url = "https://api.open5e.com/v2/creatures/"
-params = {
-    "name__iexact": "goblin"
+
+parameters = {
+    "document__key__in": "srd-2024"
 }
 
-response = requests.get(url, params=params)
 
-print(response.json())
+
+next_url = url
+
+while next_url is not None:
+    response = requests.get(next_url, params=parameters)
+    data = response.json()
+
+    for creature in data["results"]:
+        print(creature["Name"])
+
+    next_url = data["next"]
+    
