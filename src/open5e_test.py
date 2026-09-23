@@ -7,27 +7,29 @@ versionFilter = {
 }
 
 creatureFilter = {
-    "name__iexact": "goblin"
+    "name__icontains": "goblin"
 }
 
-def creatureCheck(url, creatureFilter):
-    response = requests.get(url,params=creatureFilter)
+combinedFilter = {**creatureFilter, **versionFilter}
+
+#looking at the API, which is filtered with the creatureFilter, to discover the schema of the data within the API for creatures
+def creatureCheck(url, Filter):
+    response = requests.get(url,params=Filter)
     data = response.json()
     goblin = data["results"][0]
     print(data["count"])
     for field, value in goblin.items():
         print(field, ":", value)
 
-def nameList(url,versionFilter):
-    next_url = url
-
-    while next_url is not None:
-        response = requests.get(next_url, params=versionFilter)
+def nameList(urlPlaceholder,Filter):
+    while urlPlaceholder is not None:
+        response = requests.get(urlPlaceholder, params=Filter)
         data = response.json()
 
         for creature in data["results"]:
             print(creature["name"])
 
-        next_url = data["next"]
+        urlPlaceholder = data["next"]
+    print(data["count"])
 
-creatureCheck(url, creatureFilter)
+nameList(url, combinedFilter)
