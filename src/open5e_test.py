@@ -32,4 +32,4 @@ def nameList(urlPlaceholder,Filter):
         urlPlaceholder = data["next"]
     print(data["count"])
 
-nameList(url, combinedFilter)
+creatureCheck(url, versionFilter)

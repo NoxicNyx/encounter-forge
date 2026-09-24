@@ -1,4 +1,4 @@
-CREATE TABLE sources (
+CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY,
     source_key TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
@@ -8,11 +8,11 @@ CREATE TABLE sources (
     permalink TEXT
 );
 
-CREATE TABLE monsters (
+CREATE TABLE IF NOT EXISTS monsters (
     id INTEGER PRIMARY KEY,
 
     source_id INTEGER NOT NULL,
-    source_key TEXT NOT NULL UNIQUE,
+    creature_key TEXT NOT NULL UNIQUE,
 
     name TEXT NOT NULL,
 
@@ -44,7 +44,7 @@ CREATE TABLE monsters (
     FOREIGN KEY (source_id) REFERENCES sources(id)
 );
 
-CREATE TABLE monster_ability_scores (
+CREATE TABLE IF NOT EXISTS monster_ability_scores (
     monster_id INTEGER PRIMARY KEY,
 
     strength INTEGER,
@@ -57,7 +57,7 @@ CREATE TABLE monster_ability_scores (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE monster_modifiers (
+CREATE TABLE IF NOT EXISTS monster_modifiers (
     monster_id INTEGER PRIMARY KEY,
 
     strength INTEGER,
@@ -70,7 +70,7 @@ CREATE TABLE monster_modifiers (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE monster_speeds (
+CREATE TABLE IF NOT EXISTS monster_speeds (
     monster_id INTEGER PRIMARY KEY,
 
     walk INTEGER,
@@ -88,14 +88,14 @@ CREATE TABLE monster_speeds (
 );
 
 
-CREATE TABLE languages (
+CREATE TABLE IF NOT EXISTS languages (
     id INTEGER PRIMARY KEY,
     language_key TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     description TEXT
 );
 
-CREATE TABLE monster_languages (
+CREATE TABLE IF NOT EXISTS monster_languages (
     monster_id INTEGER NOT NULL,
     language_id INTEGER NOT NULL,
 
@@ -105,7 +105,7 @@ CREATE TABLE monster_languages (
     FOREIGN KEY (language_id) REFERENCES languages(id)
 );
 
-CREATE TABLE monster_saving_throws (
+CREATE TABLE IF NOT EXISTS monster_saving_throws (
     monster_id INTEGER NOT NULL,
     ability TEXT NOT NULL,
     modifier INTEGER NOT NULL,
@@ -115,7 +115,7 @@ CREATE TABLE monster_saving_throws (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE monster_skills (
+CREATE TABLE IF NOT EXISTS monster_skills (
     monster_id INTEGER NOT NULL,
     skill TEXT NOT NULL,
     modifier INTEGER NOT NULL,
@@ -125,7 +125,7 @@ CREATE TABLE monster_skills (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE monster_defenses (
+CREATE TABLE IF NOT EXISTS monster_defenses (
     id INTEGER PRIMARY KEY,
 
     monster_id INTEGER NOT NULL,
@@ -136,7 +136,7 @@ CREATE TABLE monster_defenses (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE monster_actions (
+CREATE TABLE IF NOT EXISTS monster_actions (
     id INTEGER PRIMARY KEY,
 
     monster_id INTEGER NOT NULL,
@@ -157,7 +157,7 @@ CREATE TABLE monster_actions (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE attacks (
+CREATE TABLE IF NOT EXISTS attacks (
     id INTEGER PRIMARY KEY,
 
     action_id INTEGER NOT NULL,
@@ -182,7 +182,7 @@ CREATE TABLE attacks (
     FOREIGN KEY (action_id) REFERENCES monster_actions(id)
 );
 
-CREATE TABLE monster_traits (
+CREATE TABLE IF NOT EXISTS monster_traits (
     id INTEGER PRIMARY KEY,
 
     monster_id INTEGER NOT NULL,
@@ -193,12 +193,12 @@ CREATE TABLE monster_traits (
     FOREIGN KEY (monster_id) REFERENCES monsters(id)
 );
 
-CREATE TABLE environments (
+CREATE TABLE IF NOT EXISTS environments (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE monster_environments (
+CREATE TABLE IF NOT EXISTS monster_environments (
     monster_id INTEGER NOT NULL,
     environment_id INTEGER NOT NULL,
 
@@ -212,7 +212,7 @@ CREATE TABLE monster_environments (
     CHECK (affinity >= 0 AND affinity <= 1)
 );
 
-CREATE TABLE monster_relationships (
+CREATE TABLE IF NOT EXISTS monster_relationships (
     monster_id INTEGER NOT NULL,
     related_monster_id INTEGER NOT NULL,
 
