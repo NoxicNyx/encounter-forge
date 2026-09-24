@@ -140,31 +140,14 @@ for creature in data["results"]:
         creature["document"]
     )
 
-    monster_id = get_or_create_monster(
+    get_or_create_monster(
         cursor,
         creature,
         source_id
     )
 
-    print(creature["name"])
-
 
 # Save changes
 
 connection.commit()
-
-
-# Check what we inserted
-
-cursor.execute("""
-    SELECT id, name, source_id, challenge_rating, hit_points
-    FROM monsters
-    WHERE id = ?
-""", (monster_id,))
-
-monster = cursor.fetchone()
-
-print(monster)
-
-
 connection.close()
