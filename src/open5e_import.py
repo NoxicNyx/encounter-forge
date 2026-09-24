@@ -148,10 +148,13 @@ while current_url is not None:
     print(f"Processing: {current_url}")
     
     # Send a GET request to the current API page
-    response = requests.get(
-        current_url,
-        params=version_filter
-    )
+    if current_url == url:
+        response = requests.get(
+            current_url,
+            params=version_filter
+        )
+    else:
+        response = requests.get(current_url)
 
     # Raise an error if the API request was unsuccessful
     response.raise_for_status()
