@@ -1,25 +1,37 @@
 import sqlite3
 
-connection = sqlite3.connect("db/encounter_forge.db")
-connection.execute("PRAGMA foreign_keys = ON")
 
+connection = sqlite3.connect("db/encounter_forge.db")
 cursor = connection.cursor()
 
-cursor.execute("""
-    SELECT id, name, challenge_rating, hit_points
-    FROM monsters;
-""")
+tables = [
+    "sources",
+    "monsters",
+    "monster_ability_scores",
+    "monster_modifiers",
+    "monster_speeds",
+    "languages",
+    "monster_languages",
+    "monster_saving_throws",
+    "monster_skills",
+    "monster_defenses",
+    "monster_actions",
+    "attacks",
+    "monster_traits",
+    "environments",
+    "monster_environments",
+]
 
-monsters = cursor.fetchall()
 
-for monster in monsters:
-    print(monster)
+for table in tables:
 
-cursor.execute("""
-    PRAGMA table_info(monsters);
-""")
+    cursor.execute(
+        f"SELECT COUNT(*) FROM {table}"
+    )
 
-columns = cursor.fetchall()
-print("\n")
-for column in columns:
-    print(column)    
+    count = cursor.fetchone()[0]
+
+    print(f"{table}: {count}")
+
+
+connection.close()

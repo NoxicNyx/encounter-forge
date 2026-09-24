@@ -17,7 +17,7 @@ def creatureCheck(urlPlaceholder, Filter):
     response = requests.get(urlPlaceholder,params=Filter)
     data = response.json()
     goblin = data["results"][0]
-    print(data["count"])
+    #print(data["count"])
     for field, value in goblin.items():
         print(field, ":", value)
 
@@ -32,4 +32,4 @@ def nameList(urlPlaceholder,Filter):
         urlPlaceholder = data["next"]
     print(data["count"])
 
-creatureCheck(url, versionFilter)
+creatureCheck(url, combinedFilter)
