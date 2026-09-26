@@ -14,7 +14,22 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-from openpyxl import load_workbook
+try:
+    from openpyxl import load_workbook
+except ModuleNotFoundError:  # Allows the core bridge to be tested without Excel support.
+    load_workbook = None
+
+from creature_family import (
+    assign_profile_family,
+    family_identity,
+    migrate_profile_link_constraint,
+    populate_monster_families,
+)
+from curated_profile_mappings import (
+    apply_curated_profile_links,
+    populate_curated_profile_mappings,
+)
+from official_conversions import alias_targets_for, populate_conversion_catalogue, target_for
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -91,17 +106,29 @@ def clear_tactical_data(cursor: sqlite3.Cursor) -> None:
         WHERE EXISTS (
             SELECT 1
             FROM monster_relationship_tactical_sources provenance
+            JOIN tactical_sources ON tactical_sources.id = provenance.tactical_source_id
             WHERE provenance.monster_id = monster_relationships.monster_id
               AND provenance.related_monster_id = monster_relationships.related_monster_id
+              AND tactical_sources.source_key = ?
         )
         """
+        , (SOURCE_KEY,)
     )
-    cursor.execute("DELETE FROM monster_relationship_tactical_sources")
+    cursor.execute(
+        """
+        DELETE FROM monster_relationship_tactical_sources
+        WHERE tactical_source_id IN (
+            SELECT id FROM tactical_sources WHERE source_key = ?
+        )
+        """,
+        (SOURCE_KEY,),
+    )
     tables = [
         "tactical_pairwise_compatibility",
         "tactical_pairwise_affinities",
         "tactical_profile_evidence",
         "tactical_profile_environment_fits",
+        "tactical_profile_creature_families",
         "tactical_profile_tags",
         "tactical_profile_roles",
         "tactical_profile_scores",
@@ -111,10 +138,10 @@ def clear_tactical_data(cursor: sqlite3.Cursor) -> None:
         "tactical_roles",
         "tactical_dimensions",
         "tactical_profiles",
-        "tactical_sources",
     ]
     for table in tables:
         cursor.execute(f"DELETE FROM {table}")
+    cursor.execute("DELETE FROM tactical_sources WHERE source_key = ?", (SOURCE_KEY,))
 
 
 def get_or_create_environment(cursor: sqlite3.Cursor, name: str) -> int:
@@ -165,22 +192,31 @@ def get_or_create_tag(cursor: sqlite3.Cursor, category_key: str, name: str) -> i
     ).fetchone()[0]
 
 
-def name_tokens(value: str) -> tuple[str, ...]:
-    """Tokenise a name so substring matches remain whole-name matches."""
-    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
-
-
-def load_monsters(cursor: sqlite3.Cursor) -> list[tuple[int, str, tuple[str, ...]]]:
+def load_monsters(cursor: sqlite3.Cursor) -> list[tuple[int, str, str]]:
+    """Load current creatures with their deliberate family assignment."""
     return [
-        (monster_id, name, name_tokens(name))
-        for monster_id, name in cursor.execute("SELECT id, name FROM monsters")
+        (monster_id, name, family_key)
+        for monster_id, name, family_key in cursor.execute(
+            """
+            SELECT monsters.id, monsters.name, creature_families.family_key
+            FROM monsters
+            JOIN monster_creature_families
+              ON monster_creature_families.monster_id = monsters.id
+            JOIN creature_families
+              ON creature_families.id = monster_creature_families.creature_family_id
+            """
+        )
     ]
 
 
 def profile_monster_matches(
-    source_name: str, monsters: list[tuple[int, str, tuple[str, ...]]]
+    source_name: str, monsters: list[tuple[int, str, str]]
 ) -> list[tuple[int, str]]:
-    """Prefer exact matches, else match a complete source name within a 5e name."""
+    """Prefer exact names, then only an explicit same-family bridge.
+
+    A source ``Goblin`` may inform ``Goblin Warrior`` but never ``Hobgoblin
+    Warrior``.  This replaces the old whole-token substring rule.
+    """
     exact_matches = [
         (monster_id, "exact")
         for monster_id, monster_name, _ in monsters
@@ -189,17 +225,30 @@ def profile_monster_matches(
     if exact_matches:
         return exact_matches
 
-    source_tokens = name_tokens(source_name)
-    if not source_tokens:
-        return []
-    match_size = len(source_tokens)
+    official_target = target_for(source_name)
+    if official_target is not None:
+        conversion_matches = [
+            (monster_id, "official_conversion")
+            for monster_id, monster_name, _ in monsters
+            if monster_name.casefold() == official_target.casefold()
+        ]
+        if conversion_matches:
+            return conversion_matches
+
+    alias_targets = alias_targets_for(source_name)
+    if alias_targets:
+        alias_matches = [
+            (monster_id, "name_alias")
+            for monster_id, monster_name, _ in monsters
+            if monster_name.casefold() in {target.casefold() for target in alias_targets}
+        ]
+        if alias_matches:
+            return alias_matches
+
     return [
-        (monster_id, "substring")
-        for monster_id, _, monster_tokens in monsters
-        if any(
-            monster_tokens[index:index + match_size] == source_tokens
-            for index in range(len(monster_tokens) - match_size + 1)
-        )
+        (monster_id, "family")
+        for monster_id, _, monster_family_key in monsters
+        if monster_family_key == family_identity(source_name)[0]
     ]
 
 
@@ -207,7 +256,7 @@ def import_profiles(
     cursor: sqlite3.Cursor,
     source_id: int,
     rows: Iterable[dict[str, Any]],
-    monsters: list[tuple[int, str, tuple[str, ...]]],
+    monsters: list[tuple[int, str, str]],
 ) -> dict[str, int]:
     """Import profile metadata, scores, roles, and tag-like list fields."""
     for dimension_name in PROFILE_SCORE_COLUMNS:
@@ -253,6 +302,7 @@ def import_profiles(
             ),
         )
         profile_id = cursor.lastrowid
+        assign_profile_family(cursor, profile_id, source_name)
         profile_ids[source_name.casefold()] = profile_id
 
         cursor.executemany(
@@ -499,6 +549,10 @@ def link_explicit_book_relationships(
 
 
 def import_workbook(workbook_path: Path, db_path: Path, schema_path: Path) -> dict[str, int]:
+    if load_workbook is None:
+        raise RuntimeError(
+            "Workbook import requires openpyxl. Install the project requirements first."
+        )
     if not workbook_path.is_file():
         raise FileNotFoundError(f"Tactical workbook not found: {workbook_path}")
 
@@ -519,7 +573,11 @@ def import_workbook(workbook_path: Path, db_path: Path, schema_path: Path) -> di
     connection.execute("PRAGMA foreign_keys = ON")
     try:
         ensure_schema(connection, schema_path)
+        migrate_profile_link_constraint(connection)
         cursor = connection.cursor()
+        populate_monster_families(cursor)
+        populate_conversion_catalogue(cursor)
+        populate_curated_profile_mappings(cursor)
         clear_tactical_data(cursor)
         cursor.execute(
             """
@@ -536,6 +594,7 @@ def import_workbook(workbook_path: Path, db_path: Path, schema_path: Path) -> di
             workbook_rows(workbook, "Profiles"),
             monsters,
         )
+        apply_curated_profile_links(cursor)
         environment_fit_count = import_environment_fits(
             cursor,
             workbook_rows(workbook, "Environment Fit"),
@@ -567,15 +626,15 @@ def import_workbook(workbook_path: Path, db_path: Path, schema_path: Path) -> di
             "SELECT COUNT(DISTINCT tactical_profile_id) "
             "FROM tactical_profile_monster_links"
         ).fetchone()[0]
-        substring_links = cursor.execute(
+        family_links = cursor.execute(
             "SELECT COUNT(*) FROM tactical_profile_monster_links "
-            "WHERE match_type = 'substring'"
+            "WHERE match_type = 'family'"
         ).fetchone()[0]
         connection.commit()
         return {
             "profiles": len(profile_ids),
             "linked_profiles": linked_profiles,
-            "substring_links": substring_links,
+            "family_links": family_links,
             "evidence": evidence_count,
             "environment_fits": environment_fit_count,
             "pairwise_affinities": affinity_count,

@@ -1,225 +1,133 @@
+"""Bridge SRD 2014 habitats to SRD 2024 creatures by explicit family."""
+
+from __future__ import annotations
+
+import argparse
 import json
-import re
 import sqlite3
+from collections import defaultdict
+from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-
-# Open5e API
-url = "https://api.open5e.com/v2/creatures/"
-
-version_filter = {
-    "document__key__in": "srd-2014"
-}
+from creature_family import family_identity, populate_monster_families
+from official_conversions import alias_targets_for, target_for
 
 
-def fetch_json(request_url):
+ROOT_DIR = Path(__file__).resolve().parents[3]
+DEFAULT_DB_PATH = ROOT_DIR / "db" / "encounter_forge.db"
+API_URL = "https://api.open5e.com/v2/creatures/"
+VERSION_FILTER = {"document__key__in": "srd-2014"}
+
+
+def fetch_json(request_url: str) -> dict:
     request = Request(
         request_url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Encounter-Forge/0.1"
-        }
+        headers={"Accept": "application/json", "User-Agent": "Encounter-Forge/0.1"},
     )
     with urlopen(request, timeout=30) as response:
         return json.load(response)
 
 
-# ---------------------------------------------------------------------------
-# Get 2014 creature environments
-# ---------------------------------------------------------------------------
-
-creature_environments = {}
-
-
-def name_tokens(value):
-    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
-
-
-def source_name_within_monster(source_name, monster_name):
-    """Allow Goblin's habitats to inform Goblin Warrior, but only by tokens."""
-    source_tokens = name_tokens(source_name)
-    monster_tokens = name_tokens(monster_name)
-    return bool(source_tokens) and any(
-        monster_tokens[index:index + len(source_tokens)] == source_tokens
-        for index in range(len(monster_tokens) - len(source_tokens) + 1)
-    )
-
-current_url = f"{url}?{urlencode(version_filter)}"
-
-
-while current_url is not None:
-
-    # Apply the 2014 filter only to the first request
-    data = fetch_json(current_url)
+def load_2014_environments() -> dict[str, set[str]]:
+    """Return habitats grouped under the same family bridge as the 2024 data."""
+    by_family: dict[str, set[str]] = defaultdict(set)
+    current_url: str | None = f"{API_URL}?{urlencode(VERSION_FILTER)}"
+    while current_url is not None:
+        data = fetch_json(current_url)
+        for creature in data["results"]:
+            name = creature.get("name")
+            if not name:
+                continue
+            environments = {
+                environment["name"]
+                for environment in (creature.get("environments") or [])
+                if environment.get("name")
+            }
+            by_family[family_identity(name)[0]].update(environments)
+            # Official replacements may not share a creature family (for
+            # example Orc -> Tough), so preserve their habitats separately.
+            if target := target_for(name):
+                by_family[f"official:{target.casefold()}"].update(environments)
+            for target in alias_targets_for(name):
+                by_family[f"official:{target.casefold()}"].update(environments)
+        current_url = data.get("next")
+    return by_family
 
 
-    # Store environments against each creature name
-    for creature in data["results"]:
-
-        environments = creature.get("environments") or []
-
-        creature_environments[creature["name"]] = [
-            environment["name"]
-            for environment in environments
-        ]
-
-
-    # Move to the next page
-    current_url = data["next"]
-
-
-print(
-    f"Loaded {len(creature_environments)} creatures from 2014."
-)
-
-
-# ---------------------------------------------------------------------------
-# Connect to the 2024 database
-# ---------------------------------------------------------------------------
-
-connection = sqlite3.connect(
-    "db/encounter_forge.db"
-)
-
-connection.execute(
-    "PRAGMA foreign_keys = ON"
-)
-
-cursor = connection.cursor()
-
-
-# ---------------------------------------------------------------------------
-# Get all 2024 monsters
-# ---------------------------------------------------------------------------
-
-cursor.execute("""
-    SELECT id, name
-    FROM monsters
-""")
-
-monsters = cursor.fetchall()
-
-
-# ---------------------------------------------------------------------------
-# Match 2024 monsters to 2014 environments
-# ---------------------------------------------------------------------------
-
-matched = 0
-substring_matched = 0
-unmatched = []
-environment_links = 0
-
-
-for monster_id, monster_name in monsters:
-
-    environments = creature_environments.get(monster_name)
-
-    if environments is None:
-        inherited_environments = {
-            environment_name
-            for source_name, source_environments in creature_environments.items()
-            if source_name_within_monster(source_name, monster_name)
-            for environment_name in source_environments
-        }
-        if inherited_environments:
-            environments = sorted(inherited_environments)
-            substring_matched += 1
-
-
-    # No matching 2014 creature
-    if environments is None:
-
-        unmatched.append(monster_name)
-
-        continue
-
-
-    matched += 1
-
-
-    # Process each environment
-    for environment_name in environments:
-
-        # Get the environment ID
-        cursor.execute("""
-            SELECT id
-            FROM environments
-            WHERE name = ?
-        """, (
-            environment_name,
-        ))
-
-        environment = cursor.fetchone()
-
-
-        # Create environment if it doesn't exist
-        if environment is None:
-
-            cursor.execute("""
-                INSERT INTO environments (
-                    name
-                )
-                VALUES (?)
-            """, (
-                environment_name,
-            ))
-
-            environment_id = cursor.lastrowid
-
-        else:
-
-            environment_id = environment[0]
-
-
-        # Connect the monster to the environment
-        cursor.execute("""
-            INSERT OR IGNORE INTO monster_environments (
-                monster_id,
-                environment_id,
-                affinity
+def enrich_environments(
+    database: Path = DEFAULT_DB_PATH,
+    source_environments: dict[str, set[str]] | None = None,
+) -> dict[str, int]:
+    """Persist family-backed habitat links and return an auditable summary."""
+    if source_environments is None:
+        source_environments = load_2014_environments()
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        cursor = connection.cursor()
+        populate_monster_families(cursor)
+        # These links are entirely derived from the 2014 source. Rebuild them
+        # so an old broad-name match cannot survive the family migration.
+        cursor.execute("DELETE FROM monster_environments")
+        monsters = cursor.execute(
+            """
+            SELECT monsters.id, monsters.name, creature_families.family_key
+            FROM monsters
+            JOIN monster_creature_families
+              ON monster_creature_families.monster_id = monsters.id
+            JOIN creature_families
+              ON creature_families.id = monster_creature_families.creature_family_id
+            """
+        ).fetchall()
+        matched = links = 0
+        for monster_id, monster_name, family_key in monsters:
+            environments = source_environments.get(
+                f"official:{monster_name.casefold()}",
+                source_environments.get(family_key),
             )
-            VALUES (?, ?, ?)
-        """, (
-            monster_id,
-            environment_id,
-            None
-        ))
+            if not environments:
+                continue
+            matched += 1
+            for environment_name in environments:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO environments (name) VALUES (?)", (environment_name,)
+                )
+                environment_id = cursor.execute(
+                    "SELECT id FROM environments WHERE name = ?", (environment_name,)
+                ).fetchone()[0]
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO monster_environments (
+                        monster_id, environment_id, affinity
+                    ) VALUES (?, ?, NULL)
+                    """,
+                    (monster_id, environment_id),
+                )
+                links += 1
+        connection.commit()
+        return {
+            "source_families": len(source_environments),
+            "matched_monsters": matched,
+            "family_matched_monsters": matched,
+            "environment_links": links,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
-        environment_links += 1
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Bridge 2014 habitats through creature families.")
+    parser.add_argument("--database", type=Path, default=DEFAULT_DB_PATH)
+    args = parser.parse_args()
+    summary = enrich_environments(args.database)
+    print("Environment enrichment complete.")
+    for key, value in summary.items():
+        print(f"{key.replace('_', ' ').title()}: {value}")
 
 
-# ---------------------------------------------------------------------------
-# Save changes
-# ---------------------------------------------------------------------------
-
-connection.commit()
-
-connection.close()
-
-
-# ---------------------------------------------------------------------------
-# Results
-# ---------------------------------------------------------------------------
-
-print(
-    f"Matched: {matched}"
-)
-
-print(
-    f"Substring matched: {substring_matched}"
-)
-
-print(
-    f"Unmatched: {len(unmatched)}"
-)
-
-print("Unmatched creatures:")
-
-for monster_name in unmatched:
-    print(f"  - {monster_name}")
-
-print(
-    f"Environment links created: {environment_links}"
-)
+if __name__ == "__main__":
+    main()

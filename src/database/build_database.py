@@ -34,6 +34,7 @@ def main() -> None:
     run(DEPENDENCIES_DIR / "environment_enrichment.py")
     if args.tactical_workbook:
         run(DEPENDENCIES_DIR / "tactical_dataset_import.py", str(args.tactical_workbook))
+        run(DEPENDENCIES_DIR / "official_relationship_enrichment.py")
     print("Database build complete.")
 
 

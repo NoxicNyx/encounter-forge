@@ -29,6 +29,20 @@ class DifficultyCalculatorTests(unittest.TestCase):
         )
         self.connection.execute(
             """
+            INSERT INTO creature_families (
+                family_key, name, taxonomy_basis, source_reference
+            ) VALUES ('test-goblin', 'Test Goblin', 'exact_name', 'test fixture')
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO monster_creature_families (
+                monster_id, creature_family_id, assignment_method
+            ) VALUES (1, 1, 'exact_name')
+            """
+        )
+        self.connection.execute(
+            """
             INSERT INTO monster_actions (monster_id, name, description, order_in_statblock)
             VALUES (1, 'Scimitar', 'A quick melee weapon attack.', 1)
             """
@@ -147,6 +161,13 @@ class DifficultyCalculatorTests(unittest.TestCase):
                       0.25, 15, 8, 50)
             """
         )
+        self.connection.execute(
+            """
+            INSERT INTO monster_creature_families (
+                monster_id, creature_family_id, assignment_method
+            ) VALUES (2, 1, 'exact_name')
+            """
+        )
         self.connection.executemany(
             """
             INSERT INTO monster_relationships
@@ -224,6 +245,132 @@ class DifficultyCalculatorTests(unittest.TestCase):
         self.assertEqual(
             sum(threat.quantity for threat in recommendation.assessment.monsters), 3
         )
+
+    def test_forced_locked_creature_reports_required_xp_and_generates_unchanged(self):
+        self.connection.execute(
+            """
+            INSERT INTO monsters (
+                source_id, creature_key, name, challenge_rating,
+                armour_class, hit_points, experience_points
+            ) VALUES (1, 'test-dragon', 'Test Dragon', 10, 18, 200, 5900)
+            """
+        )
+        self.connection.commit()
+        normal = generate_encounters(
+            self.connection, [1, 1, 1, 1], slider_value=50,
+            grouping_bias="none", include_unprofiled=True, locked_monsters={2: 1},
+        )
+        self.assertFalse(normal.recommendations)
+        self.assertIn("requires", normal.message)
+        self.assertIn("Force locked encounter", normal.message)
+
+        forced = generate_encounters(
+            self.connection, [1, 1, 1, 1], slider_value=50,
+            grouping_bias="none", include_unprofiled=True, locked_monsters={2: 1},
+            force_locked=True,
+        )
+        self.assertEqual(len(forced.recommendations), 1)
+        assessment = forced.recommendations[0].assessment
+        self.assertEqual([(threat.name, threat.quantity) for threat in assessment.monsters], [("Test Dragon", 1)])
+        self.assertEqual(assessment.assessed_band, "Above High")
+        self.assertIn("Forced locked roster requires", forced.message)
+        self.assertIn("Forced locked roster", forced.recommendations[0].explanation)
+
+    def test_book_links_keeps_a_locked_creature_and_its_source_companion(self):
+        self.connection.executemany(
+            """
+            INSERT INTO monsters (
+                source_id, creature_key, name, creature_type, challenge_rating,
+                armour_class, hit_points, experience_points
+            ) VALUES (1, ?, ?, 'humanoid', ?, 15, ?, ?)
+            """,
+            [
+                ('test-veteran', 'Test Veteran', 3, 58, 700),
+                ('test-bandit', 'Test Bandit', 0.125, 11, 25),
+            ],
+        )
+        self.connection.execute(
+            "INSERT INTO tactical_sources (source_key, name) VALUES ('test-book', 'Test book')"
+        )
+        self.connection.executemany(
+            "INSERT INTO tactical_profiles (tactical_source_id, source_name) VALUES (1, ?)",
+            [('Test Veteran',), ('Test Bandit',)],
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO tactical_profile_monster_links (tactical_profile_id, monster_id, match_type)
+            VALUES (?, ?, 'exact')
+            """,
+            [(1, 2), (2, 3)],
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO monster_relationships (monster_id, related_monster_id, relationship_type, affinity)
+            VALUES (?, ?, 'may lead', 1.0)
+            """,
+            [(2, 3), (3, 2)],
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO monster_relationship_tactical_sources
+                (monster_id, related_monster_id, tactical_source_id)
+            VALUES (?, ?, 1)
+            """,
+            [(2, 3), (3, 2)],
+        )
+        self.connection.commit()
+
+        generation = generate_encounters(
+            self.connection, [3, 3, 3, 3], slider_value=100,
+            grouping_bias='book_relationships', locked_monsters={2: 1},
+            max_candidates=1,
+        )
+        self.assertTrue(generation.recommendations)
+        names = {threat.name for threat in generation.recommendations[0].assessment.monsters}
+        self.assertEqual(names, {'Test Veteran', 'Test Bandit'})
+
+    def test_force_mode_preserves_a_locked_creature_without_an_environment_match(self):
+        self.connection.execute(
+            """
+            INSERT INTO monsters (
+                source_id, creature_key, name, challenge_rating,
+                armour_class, hit_points, experience_points
+            ) VALUES (1, 'test-unfitting-dragon', 'Test Unfitting Dragon', 10, 18, 200, 5900)
+            """
+        )
+        self.connection.commit()
+        generation = generate_encounters(
+            self.connection, [1, 1, 1, 1], slider_value=50,
+            environment='forest', grouping_bias='none', include_unprofiled=True,
+            locked_monsters={2: 1}, force_locked=True,
+        )
+        self.assertEqual(len(generation.recommendations), 1)
+        self.assertEqual(
+            generation.recommendations[0].assessment.monsters[0].name,
+            'Test Unfitting Dragon',
+        )
+        self.assertEqual(generation.recommendations[0].environment_fit, 0)
+
+    def test_locked_roster_rejects_missing_xp_and_excessive_member_count(self):
+        self.connection.execute(
+            """
+            INSERT INTO monsters (
+                source_id, creature_key, name, challenge_rating,
+                armour_class, hit_points, experience_points
+            ) VALUES (1, 'test-no-xp', 'Test No XP', 1, 12, 20, NULL)
+            """
+        )
+        self.connection.commit()
+        with self.assertRaisesRegex(ValueError, 'no XP value'):
+            generate_encounters(
+                self.connection, [1, 1, 1, 1], grouping_bias='none',
+                include_unprofiled=True, locked_monsters={2: 1}, force_locked=True,
+            )
+        with self.assertRaisesRegex(ValueError, 'maximum encounter size'):
+            generate_encounters(
+                self.connection, [20, 20, 20, 20], grouping_bias='none',
+                include_unprofiled=True, locked_monsters={1: 7}, max_members=6,
+            )
 
 
 if __name__ == "__main__":

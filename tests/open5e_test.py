@@ -46,4 +46,5 @@ def nameList(urlPlaceholder,Filter):
         Filter = {}
     print(data["count"])
 
-creatureCheck(url, combinedFilter)
+if __name__ == "__main__":
+    creatureCheck(url, combinedFilter)

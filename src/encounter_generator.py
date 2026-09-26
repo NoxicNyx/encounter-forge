@@ -22,6 +22,7 @@ from encounter_difficulty import (
 class EncounterCandidate:
     monster_id: int
     name: str
+    creature_family_id: int | None
     creature_type: str | None
     challenge_rating: float | None
     armour_class: int | None
@@ -97,12 +98,6 @@ class CreaturePlan:
 
 def _tokens(value: str) -> frozenset[str]:
     return frozenset("".join(character if character.isalnum() else " " for character in value.casefold()).split())
-
-
-def _species_key(name: str) -> str:
-    """Use the first name word as the player-facing species grouping key."""
-    words = "".join(character if character.isalnum() else " " for character in name.casefold()).split()
-    return words[0] if words else ""
 
 
 def _environment_fit(selected_environment: str | None, environment_names: Iterable[str], tactical_fits: dict[str, float]) -> float:
@@ -355,12 +350,17 @@ def _candidate_pool(
     include_unprofiled: bool,
     include_missing_xp: bool,
     max_candidates: int,
+    forced_monster_ids: set[int] | None = None,
+    protected_monster_ids: set[int] | None = None,
 ) -> tuple[list[EncounterCandidate], int]:
     rows = connection.execute(
         """
-        SELECT id, name, creature_type, challenge_rating, armour_class, hit_points,
-               experience_points
+        SELECT monsters.id, monsters.name, monsters.creature_type,
+               monsters.challenge_rating, monsters.armour_class, monsters.hit_points,
+               monsters.experience_points, monster_creature_families.creature_family_id
         FROM monsters
+        LEFT JOIN monster_creature_families
+          ON monster_creature_families.monster_id = monsters.id
         ORDER BY challenge_rating, name
         """
     ).fetchall()
@@ -380,6 +380,8 @@ def _candidate_pool(
             "SELECT DISTINCT monster_id FROM tactical_profile_monster_links"
         )
     }
+    forced_monster_ids = forced_monster_ids or set()
+    protected_monster_ids = protected_monster_ids or set()
     candidates = []
     for row in rows:
         monster_id = row["id"]
@@ -391,13 +393,17 @@ def _candidate_pool(
             connection, [(monster_id, 1)],
             {monster_id: inferred_xp} if inferred_xp is not None else None,
         )[0]
-        if threat.adjusted_xp * action_economy_factor(1, party_size, count_influence) > target_xp:
+        if (
+            threat.adjusted_xp * action_economy_factor(1, party_size, count_influence) > target_xp
+            and monster_id not in forced_monster_ids
+        ):
             continue
         fit = _environment_fit(environment, environments[monster_id], tactical_fits[monster_id])
         candidates.append(
             EncounterCandidate(
                 monster_id,
                 row["name"],
+                row["creature_family_id"],
                 row["creature_type"],
                 row["challenge_rating"],
                 row["armour_class"],
@@ -411,7 +417,10 @@ def _candidate_pool(
             )
         )
     if grouping_bias == "book_relationships" or not include_unprofiled:
-        candidates = [candidate for candidate in candidates if candidate.has_tactical_profile]
+        candidates = [
+            candidate for candidate in candidates
+            if candidate.has_tactical_profile or candidate.monster_id in forced_monster_ids
+        ]
     environment_matches = sum(candidate.environment_fit > 0 for candidate in candidates)
     if environment and environment_matches:
         # Keep a book-linked companion eligible when its linked creature is a
@@ -432,6 +441,7 @@ def _candidate_pool(
             if grouping_bias == "book_relationships" and candidate.monster_id in linked_support_ids else candidate
             for candidate in candidates
             if candidate.environment_fit > 0
+            or candidate.monster_id in forced_monster_ids
             or (grouping_bias == "book_relationships" and candidate.monster_id in linked_support_ids)
         ]
     candidates.sort(
@@ -442,7 +452,26 @@ def _candidate_pool(
         ),
         reverse=True,
     )
-    return candidates[:max_candidates], environment_matches
+    # A locked roster is an explicit user choice. Keep it in the bounded
+    # search pool, along with its source-backed Book Links companions, rather
+    # than accidentally dropping either solely because a higher-XP candidate
+    # ranks ahead in a broad 2024 catalogue.
+    if grouping_bias == "book_relationships" and protected_monster_ids:
+        _, _, _, _, relationships = _load_tactical_context(connection)
+        protected_monster_ids = set(protected_monster_ids).union(
+            related_id
+            for monster_id, related_id in relationships
+            if monster_id in protected_monster_ids
+        )
+    protected = [
+        candidate for candidate in candidates
+        if candidate.monster_id in protected_monster_ids
+    ]
+    remaining = [
+        candidate for candidate in candidates
+        if candidate.monster_id not in protected_monster_ids
+    ]
+    return protected + remaining[:max(0, max_candidates - len(protected))], environment_matches
 
 
 def _stat_similarity(first: EncounterCandidate, second: EncounterCandidate) -> float:
@@ -503,7 +532,7 @@ def _group_score(
     roles = frozenset().union(*(candidate.roles for candidate in group))
     role_score = min(len(roles) / 3, 1.0)
     pair_scores = []
-    species_scores = []
+    family_scores = []
     relationship_scores = []
     stat_similarity_scores = []
     relationship_pairs = 0
@@ -512,8 +541,11 @@ def _group_score(
         for second in group[first_index + 1:]:
             pair_scores.append(compatibility.get(tuple(sorted((first.monster_id, second.monster_id))), 50.0))
             stat_similarity_scores.append(_stat_similarity(first, second))
-            species_scores.append(
-                100.0 if _species_key(first.name) and _species_key(first.name) == _species_key(second.name) else 0.0
+            family_scores.append(
+                100.0
+                if first.creature_family_id is not None
+                and first.creature_family_id == second.creature_family_id
+                else 0.0
             )
             relationship = relationships.get((first.monster_id, second.monster_id))
             if relationship is not None:
@@ -525,7 +557,7 @@ def _group_score(
             else:
                 relationship_scores.append(0.0)
     compatibility_score = sum(pair_scores) / len(pair_scores) if pair_scores else 50.0
-    species_score = sum(species_scores) / len(species_scores) if species_scores else 100.0
+    family_score = sum(family_scores) / len(family_scores) if family_scores else 100.0
     relationship_score = (
         max(
             sum(relationship_scores) / len(relationship_scores),
@@ -534,11 +566,11 @@ def _group_score(
     )
     stat_similarity = sum(stat_similarity_scores) / len(stat_similarity_scores) if stat_similarity_scores else 100.0
     if grouping_bias == "same_species":
-        grouping_score = species_score
+        grouping_score = family_score
         tactical_score = (
             0.32 * environment_fit
             + 0.16 * compatibility_score
-            + 0.24 * species_score
+            + 0.24 * family_score
             + 0.20 * stat_similarity
             + 8 * role_score
         )
@@ -601,6 +633,7 @@ def _recommendations_from_states(
     include_unprofiled: bool,
     include_missing_xp: bool,
     limit: int,
+    forced_locked_roster: bool = False,
 ) -> tuple[EncounterRecommendation, ...]:
     scored = []
     for state in states:
@@ -650,6 +683,9 @@ def _recommendations_from_states(
             if preferred_enemy_count is not None else ""
         )
         explanation = (
+            "Forced locked roster. No additional creatures were added because its threat exceeds the selected budget. "
+            if forced_locked_roster else ""
+        ) + (
             f"{description}. {count_note}{assessment.adjusted_monster_threat_xp:,.0f} adjusted XP "
             f"against a {assessment.party.requested_budget_xp:,.0f} XP target; "
             f"environment fit {environment_fit:.0f}/100, stat similarity {stat_similarity:.0f}/100, "
@@ -691,6 +727,7 @@ def generate_encounters(
     include_unprofiled: bool = False,
     include_missing_xp: bool = False,
     locked_monsters: dict[int, int] | None = None,
+    force_locked: bool = False,
     limit: int = 5,
     max_members: int = 6,
     max_candidates: int = 70,
@@ -719,6 +756,24 @@ def generate_encounters(
     if any(not isinstance(monster_id, int) or not isinstance(quantity, int) or quantity < 1 for monster_id, quantity in locked_monsters.items()):
         raise ValueError("Locked roster entries must use a monster id and a positive whole quantity.")
     capacity = calculate_party_capacity(connection, player_levels, slider_value)
+    locked_threat = 0.0
+    if locked_monsters:
+        locked_threat = sum(
+            threat.adjusted_xp
+            for threat in calculate_monster_threats(connection, list(locked_monsters.items()))
+        ) * action_economy_factor(
+            sum(locked_monsters.values()), len(player_levels), count_influence
+        )
+        if locked_threat > capacity.requested_budget_xp and not force_locked:
+            return EncounterGeneration(
+                (),
+                0,
+                0,
+                "Locked roster requires "
+                f"{locked_threat:,.0f} adjusted XP against the selected "
+                f"{capacity.requested_budget_xp:,.0f} XP budget "
+                f"({capacity.high_xp:,.0f} XP High budget). Use Force locked encounter to run it unchanged.",
+            )
     candidates, environment_matches = _candidate_pool(
         connection,
         capacity.requested_budget_xp,
@@ -729,6 +784,8 @@ def generate_encounters(
         include_unprofiled,
         include_missing_xp,
         max_candidates,
+        set(locked_monsters) if force_locked else None,
+        set(locked_monsters),
     )
     if not candidates:
         return EncounterGeneration((), 0, environment_matches, "No monsters fit the selected XP budget.")
@@ -740,12 +797,16 @@ def generate_encounters(
     locked_state = tuple(sorted(index for monster_id, quantity in locked_monsters.items() for index in [candidate_indexes[monster_id]] * quantity))
     if len(locked_state) > max_members:
         raise ValueError("Locked roster exceeds the maximum encounter size.")
-    locked_threat = (
+    candidate_locked_threat = (
         sum(candidates[index].adjusted_xp for index in locked_state)
         * action_economy_factor(len(locked_state), len(player_levels), count_influence)
         if locked_state else 0.0
     )
-    forced_locked_roster = bool(locked_state) and locked_threat > capacity.hard_xp
+    forced_locked_roster = (
+        force_locked
+        and bool(locked_state)
+        and candidate_locked_threat > capacity.requested_budget_xp
+    )
     beam: list[tuple[int, ...]] = [locked_state]
     all_states: list[tuple[int, ...]] = [locked_state] if locked_state else []
     for _ in range(0 if forced_locked_roster else max_members - len(locked_state)):
@@ -796,6 +857,7 @@ def generate_encounters(
         include_unprofiled,
         include_missing_xp,
         limit,
+        forced_locked_roster,
     )
     environment_message = (
         f" {environment_matches} candidates have a direct or tactical match for {environment}."
@@ -805,7 +867,13 @@ def generate_encounters(
         recommendations,
         len(candidates),
         environment_matches,
-        ("Locked roster exceeds the Hard budget; this encounter is shown because those creatures were locked. " if forced_locked_roster else "") + f"Searched {len(candidates)} budget-eligible candidates.{environment_message}",
+        (
+            "Forced locked roster requires "
+            f"{candidate_locked_threat:,.0f} adjusted XP against the selected "
+            f"{capacity.requested_budget_xp:,.0f} XP budget "
+            f"({capacity.high_xp:,.0f} XP High budget). "
+            if forced_locked_roster else ""
+        ) + f"Searched {len(candidates)} budget-eligible candidates.{environment_message}",
     )
 
 

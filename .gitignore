@@ -1,33 +1,33 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
 .venv/
+venv/
 
-# Local database
-*.db
-
-# Build output
-build/
-dist/
-release/
-release-fixed/
-release-tk/
-
-# PyInstaller
-*.spec
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# Local database
-*.db
-
-# PyInstaller / build output
+# Build / PyInstaller
 build/
 build-*/
 dist/
 release/
 release-*/
 *.spec
+
+# Generated outputs
+outputs/
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated SQLite database
+db/encounter_forge.db
+
+# Node dependencies
+node_modules/
+**/node_modules/

@@ -20,10 +20,12 @@ python src/database/build_database.py --tactical-workbook "C:\path\to\Encounter_
 
 The database keeps Open5e stat-block data separate from book-derived tactical
 profiles. Tactical profiles retain their workbook name when no exact current
-Open5e creature match exists, so an import never drops source evidence. Exact
-and whole-token substring matches let a source entry such as `Goblin` inform
-`Goblin Warrior` without matching unrelated partial words. The environment
-enrichment uses the same rule.
+Open5e creature match exists, so an import never drops source evidence. The
+database assigns each creature an explicit, conservative creature family and
+uses that bridge for 2014-to-2024 data: `Goblin` can inform `Goblin Warrior`,
+while `Hobgoblin` and `Bugbear` remain separate families. Unknown names remain
+their own family rather than being guessed from a shared word. Environment
+enrichment uses the same family bridge.
 
 ## Difficulty calculator
 
@@ -43,12 +45,11 @@ monster search window while the encounter generator is built.
 
 ## Encounter builder
 
-Run `python src/encounter_forge_qt.py` for the Qt encounter-builder application.
-The previous Tkinter entry point remains available as a development fallback;
-the Qt application is the supported end-user interface.
+Run `python src/encounter_forge_gui.py` for the encounter-builder application.
 It returns several groups within the selected XP budget and scores them for
 environment fit, tactical roles, pairwise compatibility, and the grouping mode
-you select: Same species (first name word), Book links, or No bias. Book Links
+you select: Creature family, Book links, or No bias. Creature family is an
+explicit database assignment rather than a first-word name match. Book Links
 mode is strict: every distinct creature in a result must connect to another
 distinct creature through imported source-backed relationship evidence.
 
@@ -64,7 +65,7 @@ coverage toggles alongside the generated monster group.
 Build the portable Windows application from the repository root:
 
 ```powershell
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name EncounterForge --runtime-hook src\qt_runtime_hook.py --add-data "db\encounter_forge.db;db" --add-data "db\schema.sql;db" src\encounter_forge_qt.py
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name EncounterForge --add-data "db\encounter_forge.db;db" --add-data "db\schema.sql;db" src\encounter_forge_gui.py
 ```
 
 Launch `dist\EncounterForge\EncounterForge.exe`. The first run copies the

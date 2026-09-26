@@ -10,27 +10,246 @@ import sys
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from encounter_difficulty import calculate_party_capacity
+from encounter_difficulty import assess_encounter, calculate_party_capacity
 from encounter_generator import EncounterRecommendation, generate_encounters, save_recommendation
+from database.dependencies.creature_family import (
+    assign_profile_family,
+    migrate_profile_link_constraint,
+    populate_monster_families,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
-def application_paths() -> tuple[Path, Path]:
-    """Return writable database and bundled schema paths in source or packaged runs."""
+def application_paths() -> tuple[Path, Path, Path]:
+    """Return writable database, schema, and seed catalogue paths."""
     if not getattr(sys, "frozen", False):
-        return ROOT_DIR / "db" / "encounter_forge.db", ROOT_DIR / "db" / "schema.sql"
+        database = ROOT_DIR / "db" / "encounter_forge.db"
+        return database, ROOT_DIR / "db" / "schema.sql", database
     bundle_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     data_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Encounter Forge"
     data_dir.mkdir(parents=True, exist_ok=True)
     database_path = data_dir / "encounter_forge.db"
     if not database_path.exists():
         shutil.copy2(bundle_dir / "db" / "encounter_forge.db", database_path)
-    return database_path, bundle_dir / "db" / "schema.sql"
+    return database_path, bundle_dir / "db" / "schema.sql", bundle_dir / "db" / "encounter_forge.db"
 
 
-DB_PATH, SCHEMA_PATH = application_paths()
+DB_PATH, SCHEMA_PATH, BUNDLED_DB_PATH = application_paths()
+
+
+def refresh_derived_environments(connection: sqlite3.Connection, seed_database: Path) -> None:
+    """Refresh only imported habitats when a pre-family user catalogue upgrades."""
+    if seed_database == DB_PATH or not seed_database.exists():
+        return
+    seed = sqlite3.connect(seed_database)
+    try:
+        rows = seed.execute(
+            """
+            SELECT monsters.creature_key, environments.name
+            FROM monster_environments
+            JOIN monsters ON monsters.id = monster_environments.monster_id
+            JOIN environments ON environments.id = monster_environments.environment_id
+            """
+        ).fetchall()
+    finally:
+        seed.close()
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM monster_environments")
+    for creature_key, environment_name in rows:
+        monster = cursor.execute(
+            "SELECT id FROM monsters WHERE creature_key = ?", (creature_key,)
+        ).fetchone()
+        if monster is None:
+            continue
+        cursor.execute("INSERT OR IGNORE INTO environments (name) VALUES (?)", (environment_name,))
+        environment_id = cursor.execute(
+            "SELECT id FROM environments WHERE name = ?", (environment_name,)
+        ).fetchone()[0]
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO monster_environments (monster_id, environment_id, affinity)
+            VALUES (?, ?, NULL)
+            """,
+            (monster[0], environment_id),
+        )
+
+
+def sync_conversion_bridge(connection: sqlite3.Connection, seed_database: Path) -> bool:
+    """Copy audited conversion links into a pre-existing per-user catalogue."""
+    if seed_database == DB_PATH or not seed_database.exists():
+        return False
+    seed = sqlite3.connect(seed_database)
+    try:
+        conversion_rows = seed.execute(
+            "SELECT source_name, target_name, source_reference FROM creature_edition_conversions"
+        ).fetchall()
+        alias_rows = seed.execute(
+            "SELECT source_name, target_name, source_reference FROM creature_name_aliases"
+        ).fetchall()
+        link_rows = seed.execute(
+            """
+            SELECT profiles.source_name, monsters.creature_key, links.match_type
+            FROM tactical_profile_monster_links links
+            JOIN tactical_profiles profiles ON profiles.id = links.tactical_profile_id
+            JOIN monsters ON monsters.id = links.monster_id
+            """
+        ).fetchall()
+        relationship_rows = seed.execute(
+            """
+            SELECT first_monster.creature_key, second_monster.creature_key,
+                   relationships.relationship_type, relationships.affinity,
+                   sources.source_key, sources.name, sources.version, sources.source_reference
+            FROM monster_relationship_tactical_sources provenance
+            JOIN tactical_sources sources ON sources.id = provenance.tactical_source_id
+            JOIN monster_relationships relationships
+              ON relationships.monster_id = provenance.monster_id
+             AND relationships.related_monster_id = provenance.related_monster_id
+            JOIN monsters first_monster ON first_monster.id = relationships.monster_id
+            JOIN monsters second_monster ON second_monster.id = relationships.related_monster_id
+            WHERE sources.source_key = 'dnd-basic-rules-2014-creature-relationships'
+            """
+        ).fetchall()
+    finally:
+        seed.close()
+    cursor = connection.cursor()
+    local_count = cursor.execute("SELECT COUNT(*) FROM creature_edition_conversions").fetchone()[0]
+    if local_count >= len(conversion_rows):
+        return False
+    cursor.executemany(
+        """
+        INSERT INTO creature_edition_conversions (source_name, target_name, source_reference)
+        VALUES (?, ?, ?)
+        ON CONFLICT(source_name) DO UPDATE SET
+            target_name = excluded.target_name,
+            source_reference = excluded.source_reference
+        """,
+        conversion_rows,
+    )
+    cursor.executemany(
+        """
+        INSERT INTO creature_name_aliases (source_name, target_name, source_reference)
+        VALUES (?, ?, ?)
+        ON CONFLICT(source_name, target_name) DO UPDATE SET
+            source_reference = excluded.source_reference
+        """,
+        alias_rows,
+    )
+    # Profile links are imported evidence, not user-authored records; refresh
+    # them from the exact bundled catalogue by stable source names and keys.
+    cursor.execute("DELETE FROM tactical_profile_monster_links")
+    for source_name, creature_key, match_type in link_rows:
+        profile = cursor.execute(
+            "SELECT id FROM tactical_profiles WHERE lower(source_name) = lower(?)", (source_name,)
+        ).fetchone()
+        monster = cursor.execute(
+            "SELECT id FROM monsters WHERE creature_key = ?", (creature_key,)
+        ).fetchone()
+        if profile is not None and monster is not None:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO tactical_profile_monster_links (
+                    tactical_profile_id, monster_id, match_type
+                ) VALUES (?, ?, ?)
+                """,
+                (profile[0], monster[0], match_type),
+            )
+    for first_key, second_key, relation_type, affinity, source_key, name, version, reference in relationship_rows:
+        cursor.execute(
+            """
+            INSERT INTO tactical_sources (source_key, name, version, source_reference)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                name = excluded.name, version = excluded.version, source_reference = excluded.source_reference
+            """,
+            (source_key, name, version, reference),
+        )
+        source_id = cursor.execute(
+            "SELECT id FROM tactical_sources WHERE source_key = ?", (source_key,)
+        ).fetchone()[0]
+        first = cursor.execute("SELECT id FROM monsters WHERE creature_key = ?", (first_key,)).fetchone()
+        second = cursor.execute("SELECT id FROM monsters WHERE creature_key = ?", (second_key,)).fetchone()
+        if first is None or second is None:
+            continue
+        cursor.execute(
+            """
+            INSERT INTO monster_relationships (
+                monster_id, related_monster_id, relationship_type, affinity
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(monster_id, related_monster_id) DO UPDATE SET
+                relationship_type = excluded.relationship_type, affinity = excluded.affinity
+            """,
+            (first[0], second[0], relation_type, affinity),
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO monster_relationship_tactical_sources (
+                monster_id, related_monster_id, tactical_source_id
+            ) VALUES (?, ?, ?)
+            """,
+            (first[0], second[0], source_id),
+        )
+    return True
+
+
+def sync_curated_mapping_bridge(connection: sqlite3.Connection, seed_database: Path) -> bool:
+    """Apply new source-backed curated links without overwriting saved data."""
+    if seed_database == DB_PATH or not seed_database.exists():
+        return False
+    seed = sqlite3.connect(seed_database)
+    try:
+        mapping_rows = seed.execute(
+            """
+            SELECT source_name, creature_key, source_reference
+            FROM curated_profile_monster_mappings
+            """
+        ).fetchall()
+    finally:
+        seed.close()
+    if not mapping_rows:
+        return False
+    cursor = connection.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO curated_profile_monster_mappings (
+            source_name, creature_key, source_reference
+        ) VALUES (?, ?, ?)
+        ON CONFLICT(source_name, creature_key) DO UPDATE SET
+            source_reference = excluded.source_reference
+        """,
+        mapping_rows,
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO tactical_profile_monster_links (
+            tactical_profile_id, monster_id, match_type
+        )
+        SELECT profiles.id, monsters.id, 'curated_mapping'
+        FROM curated_profile_monster_mappings mappings
+        JOIN tactical_profiles profiles
+          ON lower(profiles.source_name) = lower(mappings.source_name)
+        JOIN monsters ON monsters.creature_key = mappings.creature_key
+        """
+    )
+    return True
+
+
+def migrate_family_catalogue(connection: sqlite3.Connection) -> None:
+    """Add family data to an existing per-user app database without losing saves."""
+    migrate_profile_link_constraint(connection)
+    cursor = connection.cursor()
+    needs_seed = cursor.execute("SELECT COUNT(*) FROM monster_creature_families").fetchone()[0] == 0
+    updated_conversions = sync_conversion_bridge(connection, BUNDLED_DB_PATH)
+    sync_curated_mapping_bridge(connection, BUNDLED_DB_PATH)
+    if needs_seed or updated_conversions:
+        refresh_derived_environments(connection, BUNDLED_DB_PATH)
+    populate_monster_families(cursor)
+    for profile_id, source_name in cursor.execute(
+        "SELECT id, source_name FROM tactical_profiles"
+    ).fetchall():
+        assign_profile_family(cursor, profile_id, source_name)
+    connection.commit()
 
 BG = "#20140D"
 SURFACE = "#352116"
@@ -57,6 +276,7 @@ class EncounterForgeApp(tk.Tk):
         # Apply additive schema changes so saved encounter settings work with
         # an existing local database without requiring a full re-import.
         self.connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        migrate_family_catalogue(self.connection)
         self.party_size = tk.IntVar(value=4)
         self.slider_value = tk.IntVar(value=50)
         self.enemy_count_preference = tk.IntVar(value=4)
@@ -247,7 +467,12 @@ class EncounterForgeApp(tk.Tk):
         ttk.Button(roster_actions, text="Lock creature", style="Secondary.TButton", command=self._add_locked_creature).pack(side="left", padx=(7, 0))
         ttk.Button(roster_actions, text="Reset roster", style="Secondary.TButton", command=self._reset_locked_roster).pack(side="right")
         self.roster_status = ttk.Label(form, style="Surface.TLabel", wraplength=260)
-        self.roster_status.pack(anchor="w", pady=(3, 14))
+        self.roster_status.pack(anchor="w", pady=(3, 6))
+        self.force_roster_button = tk.Button(
+            form, text="FORCE LOCKED ENCOUNTER", command=self._force_locked_encounter,
+            relief="flat", font=("Segoe UI", 9, "bold"), padx=9, pady=5,
+        )
+        self.force_roster_button.pack(anchor="w", pady=(0, 14))
         self._refresh_locked_roster()
         self.after_idle(self._refresh_sidebar_scrollregion)
 
@@ -264,7 +489,7 @@ class EncounterForgeApp(tk.Tk):
         bias_row.pack(fill="x")
         tk.Label(bias_row, text="GROUPING BIAS", background=SURFACE, foreground=MUTED, font=("Segoe UI", 8, "bold")).pack(side="left", padx=(12, 7), pady=(7, 3))
         for label, value in (
-            ("Same species", "same_species"),
+            ("Creature family", "same_species"),
             ("Book links", "book_relationships"),
             ("No bias", "none"),
         ):
@@ -398,7 +623,55 @@ class EncounterForgeApp(tk.Tk):
     def _refresh_locked_roster(self) -> None:
         names = {monster_id: name for name, monster_id in self.roster_names.items()}
         text = ", ".join(f"{quantity} x {names[monster_id]}" for monster_id, quantity in self.locked_roster.items())
-        self.roster_status.config(text=text or "No creatures locked.")
+        if not self.locked_roster:
+            self.roster_status.config(text="No creatures locked.")
+            self.force_roster_button.config(
+                state=tk.DISABLED, background=SURFACE_LIGHT, foreground=MUTED,
+                activebackground=SURFACE_LIGHT,
+            )
+            return
+        try:
+            assessment = assess_encounter(
+                self.connection,
+                self._levels(),
+                list(self.locked_roster.items()),
+                slider_value=int(self.slider_value.get()),
+                count_influence=int(self.count_influence.get()),
+            )
+        except (ValueError, sqlite3.Error) as error:
+            self.roster_status.config(text=f"{text}\nXP unavailable: {error}")
+            self.force_roster_button.config(
+                state=tk.DISABLED, background=SURFACE_LIGHT, foreground=MUTED,
+                activebackground=SURFACE_LIGHT,
+            )
+            return
+        required = assessment.adjusted_monster_threat_xp
+        party = assessment.party
+        if required > party.requested_budget_xp:
+            over_high = max(0, required - party.high_xp)
+            high_note = (
+                f" {over_high:,.0f} XP above High."
+                if over_high else " Within the High ceiling."
+            )
+            self.roster_status.config(
+                text=(
+                    f"{text}\nRequires {required:,.0f} adjusted XP. "
+                    f"Selected budget {party.requested_budget_xp:,.0f} XP; "
+                    f"High {party.high_xp:,.0f} XP.{high_note}"
+                )
+            )
+            self.force_roster_button.config(
+                state=tk.NORMAL, background="#9E3D2A", foreground="white",
+                activebackground="#C85D3B",
+            )
+        else:
+            self.roster_status.config(
+                text=f"{text}\nRequires {required:,.0f} adjusted XP; within the selected {party.requested_budget_xp:,.0f} XP budget."
+            )
+            self.force_roster_button.config(
+                state=tk.DISABLED, background=SURFACE_LIGHT, foreground=MUTED,
+                activebackground=SURFACE_LIGHT,
+            )
 
     def _refresh_capacity(self) -> None:
         try:
@@ -408,6 +681,8 @@ class EncounterForgeApp(tk.Tk):
         except ValueError as error:
             self.difficulty_name.config(text="Check party levels")
             self.difficulty_hint.config(text=str(error))
+        if hasattr(self, "force_roster_button"):
+            self._refresh_locked_roster()
 
     def _refresh_enemy_count(self) -> None:
         count = int(self.enemy_count_preference.get())
@@ -488,7 +763,10 @@ class EncounterForgeApp(tk.Tk):
         text = "2024 base XP" if influence == 0 else f"{influence}% 2014 action economy"
         self.count_influence_hint.config(text=text)
 
-    def _generate(self) -> None:
+    def _force_locked_encounter(self) -> None:
+        self._generate(force_locked=True)
+
+    def _generate(self, force_locked: bool = False) -> None:
         try:
             selected_environment = self.environment_var.get()
             generation = generate_encounters(
@@ -505,6 +783,7 @@ class EncounterForgeApp(tk.Tk):
                 include_unprofiled=self.include_unprofiled.get(),
                 include_missing_xp=self.include_missing_xp.get(),
                 locked_monsters=self.locked_roster,
+                force_locked=force_locked,
                 max_members=min(20, max(6, int(self.enemy_count_preference.get()) + 3)),
             )
         except (ValueError, sqlite3.Error) as error:
@@ -530,12 +809,15 @@ class EncounterForgeApp(tk.Tk):
                 ),
             )
         self.status_label.config(text=generation.message)
-        self.header_status.config(text="GENERATED", background="#153C3A", foreground=SUCCESS)
+        if force_locked and self.recommendations:
+            self.header_status.config(text="FORCED", background="#6E2B21", foreground="#FFD9CA")
+        else:
+            self.header_status.config(text="GENERATED", background="#153C3A", foreground=SUCCESS)
         if self.recommendations:
             self.result_tree.selection_set("0")
             self._show_recommendation()
         else:
-            self._set_detail("No coherent group fits this budget. Raise the slider, select a different environment, or increase party levels.")
+            self._set_detail(generation.message)
 
     def _show_recommendation(self, _event=None) -> None:
         selection = self.result_tree.selection()
@@ -568,7 +850,7 @@ class EncounterForgeApp(tk.Tk):
         )
         self.detail_text.insert(tk.END, f"\nShared roles: {', '.join(recommendation.roles) or 'No tactical profile linked.'}\n")
         bias_labels = {
-            "same_species": "Same species (first name word)",
+            "same_species": "Creature family",
             "book_relationships": "Book relationships",
             "none": "No grouping bias",
         }
@@ -583,7 +865,7 @@ class EncounterForgeApp(tk.Tk):
         )
         self.detail_text.insert(tk.END, "\nRELATIONSHIP EVIDENCE\n", "section")
         relationship_fallback = {
-            "same_species": "No explicit book relationship is required; this group is ranked by its shared first name word.",
+            "same_species": "No explicit book relationship is required; this group is ranked by its explicit creature family.",
             "book_relationships": "No source-backed relationship evidence was found.",
             "none": "No relationship preference was applied to this group.",
         }[recommendation.grouping_bias]

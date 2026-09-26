@@ -227,6 +227,59 @@ CREATE TABLE IF NOT EXISTS monster_relationships (
     CHECK (affinity >= 0 AND affinity <= 1)
 );
 
+-- Creature families are a deliberate cross-edition bridge, rather than a
+-- textual-name heuristic.  A family represents variants of one creature
+-- (for example Goblin and Goblin Warrior), not a broad monster tag such as
+-- "goblinoid".  Thus Goblins, Hobgoblins, and Bugbears remain distinct.
+CREATE TABLE IF NOT EXISTS creature_families (
+    id INTEGER PRIMARY KEY,
+    family_key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    taxonomy_basis TEXT NOT NULL,
+    source_reference TEXT NOT NULL,
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS monster_creature_families (
+    monster_id INTEGER PRIMARY KEY,
+    creature_family_id INTEGER NOT NULL,
+    assignment_method TEXT NOT NULL,
+
+    FOREIGN KEY (monster_id) REFERENCES monsters(id),
+    FOREIGN KEY (creature_family_id) REFERENCES creature_families(id),
+    CHECK (assignment_method IN ('curated_baseline', 'exact_name'))
+);
+
+-- Official, sometimes non-family, 2014-to-2024 stat-block replacements.
+-- These are kept separate from creature families: for example, Orc -> Tough
+-- is a supported conversion but does not claim that Tough is an Orc family.
+CREATE TABLE IF NOT EXISTS creature_edition_conversions (
+    source_name TEXT PRIMARY KEY,
+    target_name TEXT NOT NULL,
+    source_reference TEXT NOT NULL
+);
+
+-- Audited spelling, encoding, and split-name aliases that are not mechanical
+-- stat-block conversions (for example Erinys -> Erinyes).
+CREATE TABLE IF NOT EXISTS creature_name_aliases (
+    source_name TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    source_reference TEXT NOT NULL,
+
+    PRIMARY KEY (source_name, target_name)
+);
+
+-- Deliberate research-backed bridges from a tactical profile to an otherwise
+-- unmatched 2024 stat block. These do not assert an edition conversion or a
+-- creature-family identity; they preserve the supporting book reference.
+CREATE TABLE IF NOT EXISTS curated_profile_monster_mappings (
+    source_name TEXT NOT NULL,
+    creature_key TEXT NOT NULL,
+    source_reference TEXT NOT NULL,
+
+    PRIMARY KEY (source_name, creature_key)
+);
+
 CREATE TABLE IF NOT EXISTS monster_relationship_tactical_sources (
     monster_id INTEGER NOT NULL,
     related_monster_id INTEGER NOT NULL,
@@ -327,7 +380,17 @@ CREATE TABLE IF NOT EXISTS tactical_profile_monster_links (
 
     FOREIGN KEY (tactical_profile_id) REFERENCES tactical_profiles(id),
     FOREIGN KEY (monster_id) REFERENCES monsters(id),
-    CHECK (match_type IN ('exact', 'substring'))
+    CHECK (match_type IN ('exact', 'family', 'official_conversion', 'name_alias', 'curated_mapping'))
+);
+
+CREATE TABLE IF NOT EXISTS tactical_profile_creature_families (
+    tactical_profile_id INTEGER PRIMARY KEY,
+    creature_family_id INTEGER NOT NULL,
+    assignment_method TEXT NOT NULL,
+
+    FOREIGN KEY (tactical_profile_id) REFERENCES tactical_profiles(id),
+    FOREIGN KEY (creature_family_id) REFERENCES creature_families(id),
+    CHECK (assignment_method IN ('curated_baseline', 'exact_name'))
 );
 
 CREATE TABLE IF NOT EXISTS tactical_dimensions (
