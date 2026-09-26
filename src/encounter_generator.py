@@ -604,6 +604,8 @@ def _recommendations_from_states(
 ) -> tuple[EncounterRecommendation, ...]:
     scored = []
     for state in states:
+        if not state:
+            continue
         score, environment_fit, tactical_score, stat_similarity, grouping_score, roles, notes = _group_score(
             state, candidates, target_xp, compatibility, relationships, preferred_enemy_count,
             grouping_bias, len(player_levels), count_influence,
@@ -738,12 +740,15 @@ def generate_encounters(
     locked_state = tuple(sorted(index for monster_id, quantity in locked_monsters.items() for index in [candidate_indexes[monster_id]] * quantity))
     if len(locked_state) > max_members:
         raise ValueError("Locked roster exceeds the maximum encounter size.")
-    locked_threat = sum(candidates[index].adjusted_xp for index in locked_state) * action_economy_factor(len(locked_state), len(player_levels), count_influence)
-    if locked_threat > capacity.requested_budget_xp:
-        return EncounterGeneration((), len(candidates), environment_matches, "Locked roster exceeds the selected encounter budget.")
+    locked_threat = (
+        sum(candidates[index].adjusted_xp for index in locked_state)
+        * action_economy_factor(len(locked_state), len(player_levels), count_influence)
+        if locked_state else 0.0
+    )
+    forced_locked_roster = bool(locked_state) and locked_threat > capacity.hard_xp
     beam: list[tuple[int, ...]] = [locked_state]
-    all_states: list[tuple[int, ...]] = []
-    for _ in range(max_members - len(locked_state)):
+    all_states: list[tuple[int, ...]] = [locked_state] if locked_state else []
+    for _ in range(0 if forced_locked_roster else max_members - len(locked_state)):
         expanded = []
         for state in beam:
             first_candidate = state[-1] if state else 0
@@ -785,7 +790,7 @@ def generate_encounters(
         compatibility,
         relationships,
         preferred_enemy_count,
-        grouping_bias,
+        "none" if forced_locked_roster else grouping_bias,
         count_influence,
         max_distinct_creatures,
         include_unprofiled,
@@ -800,7 +805,7 @@ def generate_encounters(
         recommendations,
         len(candidates),
         environment_matches,
-        f"Searched {len(candidates)} budget-eligible candidates.{environment_message}",
+        ("Locked roster exceeds the Hard budget; this encounter is shown because those creatures were locked. " if forced_locked_roster else "") + f"Searched {len(candidates)} budget-eligible candidates.{environment_message}",
     )
 
 

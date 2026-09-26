@@ -100,7 +100,12 @@ class EncounterForgeApp(tk.Tk):
     def _scroll_sidebar(self, event):
         widget = self.winfo_containing(event.x_root, event.y_root)
         while widget is not None:
+            if isinstance(widget, (ttk.Spinbox, ttk.Combobox, tk.Scale)):
+                return "break"
             if widget == self.sidebar_canvas:
+                region = self.sidebar_canvas.bbox("all")
+                if not region or region[3] - region[1] <= self.sidebar_canvas.winfo_height():
+                    return "break"
                 self.sidebar_canvas.yview_scroll(-int(event.delta / 120), "units")
                 return "break"
             widget = widget.master
@@ -195,7 +200,7 @@ class EncounterForgeApp(tk.Tk):
         ttk.Combobox(form, textvariable=self.environment_var, values=environments, state="readonly", width=28).pack(fill="x", pady=(5, 16))
 
         self._surface_label(form, "ENEMY COUNT").pack(anchor="w")
-        self.enemy_count_hint = ttk.Label(form, style="Surface.TLabel")
+        self.enemy_count_hint = ttk.Label(form, style="Surface.TLabel", wraplength=255, justify="left")
         self.enemy_count_hint.pack(anchor="w", pady=(4, 2))
         tk.Scale(
             form, from_=1, to=20, orient="horizontal",
