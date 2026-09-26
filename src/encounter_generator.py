@@ -688,6 +688,7 @@ def generate_encounters(
     max_distinct_creatures: int | None = None,
     include_unprofiled: bool = False,
     include_missing_xp: bool = False,
+    locked_monsters: dict[int, int] | None = None,
     limit: int = 5,
     max_members: int = 6,
     max_candidates: int = 70,
@@ -712,6 +713,9 @@ def generate_encounters(
         raise ValueError("Creature variety limit must be a whole number from 1 to 20.")
     if not isinstance(max_members, int) or not 1 <= max_members <= 20:
         raise ValueError("Maximum enemy count must be a whole number from 1 to 20.")
+    locked_monsters = locked_monsters or {}
+    if any(not isinstance(monster_id, int) or not isinstance(quantity, int) or quantity < 1 for monster_id, quantity in locked_monsters.items()):
+        raise ValueError("Locked roster entries must use a monster id and a positive whole quantity.")
     capacity = calculate_party_capacity(connection, player_levels, slider_value)
     candidates, environment_matches = _candidate_pool(
         connection,
@@ -727,9 +731,19 @@ def generate_encounters(
     if not candidates:
         return EncounterGeneration((), 0, environment_matches, "No monsters fit the selected XP budget.")
     _, _, _, compatibility, relationships = _load_tactical_context(connection)
-    beam: list[tuple[int, ...]] = [()]
+    candidate_indexes = {candidate.monster_id: index for index, candidate in enumerate(candidates)}
+    missing_locked = set(locked_monsters).difference(candidate_indexes)
+    if missing_locked:
+        return EncounterGeneration((), len(candidates), environment_matches, "A locked creature is not eligible for these settings.")
+    locked_state = tuple(sorted(index for monster_id, quantity in locked_monsters.items() for index in [candidate_indexes[monster_id]] * quantity))
+    if len(locked_state) > max_members:
+        raise ValueError("Locked roster exceeds the maximum encounter size.")
+    locked_threat = sum(candidates[index].adjusted_xp for index in locked_state) * action_economy_factor(len(locked_state), len(player_levels), count_influence)
+    if locked_threat > capacity.requested_budget_xp:
+        return EncounterGeneration((), len(candidates), environment_matches, "Locked roster exceeds the selected encounter budget.")
+    beam: list[tuple[int, ...]] = [locked_state]
     all_states: list[tuple[int, ...]] = []
-    for _ in range(max_members):
+    for _ in range(max_members - len(locked_state)):
         expanded = []
         for state in beam:
             first_candidate = state[-1] if state else 0

@@ -32,17 +32,17 @@ def application_paths() -> tuple[Path, Path]:
 
 DB_PATH, SCHEMA_PATH = application_paths()
 
-BG = "#0B1020"
-SURFACE = "#131B2E"
-SURFACE_LIGHT = "#1A2540"
-SURFACE_SELECTED = "#202E50"
-BORDER = "#2A395C"
-TEXT = "#F4F7FF"
-MUTED = "#9DABC7"
-ACCENT = "#8B7CFF"
-ACCENT_HOVER = "#A99FFF"
-SUCCESS = "#55D6A4"
-WARNING = "#F5C76E"
+BG = "#20140D"
+SURFACE = "#352116"
+SURFACE_LIGHT = "#4A2F1D"
+SURFACE_SELECTED = "#624126"
+BORDER = "#8A6135"
+TEXT = "#F7E8C6"
+MUTED = "#C9AA79"
+ACCENT = "#C47A2C"
+ACCENT_HOVER = "#E3A44D"
+SUCCESS = "#8FCB8A"
+WARNING = "#F1C46E"
 
 
 class EncounterForgeApp(tk.Tk):
@@ -60,6 +60,7 @@ class EncounterForgeApp(tk.Tk):
         self.party_size = tk.IntVar(value=4)
         self.slider_value = tk.IntVar(value=50)
         self.enemy_count_preference = tk.IntVar(value=4)
+        self.enemy_count_preference_enabled = tk.BooleanVar(value=True)
         self.count_influence = tk.IntVar(value=0)
         self.grouping_bias = tk.StringVar(value="book_relationships")
         self.variety_enabled = tk.BooleanVar(value=False)
@@ -68,6 +69,7 @@ class EncounterForgeApp(tk.Tk):
         self.include_missing_xp = tk.BooleanVar(value=False)
         self.environment_var = tk.StringVar(value="Any environment")
         self.level_vars: list[tk.IntVar] = []
+        self.locked_roster: dict[int, int] = {}
         self.recommendations: tuple[EncounterRecommendation, ...] = ()
         self._configure_styles()
         self._build()
@@ -80,10 +82,20 @@ class EncounterForgeApp(tk.Tk):
         super().destroy()
 
     def _refresh_sidebar_scrollregion(self, _event=None) -> None:
-        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
+        region = self.sidebar_canvas.bbox("all")
+        self.sidebar_canvas.configure(scrollregion=region)
+        if not region:
+            return
+        needs_scrollbar = (region[3] - region[1]) > self.sidebar_canvas.winfo_height()
+        visible = bool(self.sidebar_scrollbar.winfo_manager())
+        if needs_scrollbar and not visible:
+            self.sidebar_scrollbar.pack(side="right", fill="y")
+        elif not needs_scrollbar and visible:
+            self.sidebar_scrollbar.pack_forget()
 
     def _resize_sidebar_form(self, event) -> None:
         self.sidebar_canvas.itemconfigure(self.sidebar_window, width=event.width)
+        self._refresh_sidebar_scrollregion()
 
     def _scroll_sidebar(self, event):
         widget = self.winfo_containing(event.x_root, event.y_root)
@@ -155,14 +167,13 @@ class EncounterForgeApp(tk.Tk):
             style="Surface.TLabel", wraplength=260,
         ).pack(anchor="w", pady=(10, 0))
 
-        sidebar_scrollbar = ttk.Scrollbar(inner, orient="vertical")
-        sidebar_scrollbar.pack(side="right", fill="y")
+        self.sidebar_scrollbar = ttk.Scrollbar(inner, orient="vertical")
         self.sidebar_canvas = tk.Canvas(
             inner, background=SURFACE, highlightthickness=0, borderwidth=0,
-            yscrollcommand=sidebar_scrollbar.set,
+            yscrollcommand=self.sidebar_scrollbar.set,
         )
         self.sidebar_canvas.pack(side="left", fill="both", expand=True)
-        sidebar_scrollbar.config(command=self.sidebar_canvas.yview)
+        self.sidebar_scrollbar.config(command=self.sidebar_canvas.yview)
         form = ttk.Frame(self.sidebar_canvas, style="Surface.TFrame")
         self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=form, anchor="nw")
         form.bind("<Configure>", self._refresh_sidebar_scrollregion)
@@ -197,6 +208,8 @@ class EncounterForgeApp(tk.Tk):
         count_labels.pack(fill="x", pady=(0, 14))
         tk.Label(count_labels, text="One threat", background=SURFACE, foreground=MUTED, font=("Segoe UI", 8)).pack(side="left")
         tk.Label(count_labels, text="Crowd", background=SURFACE, foreground=MUTED, font=("Segoe UI", 8)).pack(side="right")
+        self.enemy_count_toggle = tk.Button(form, command=self._toggle_enemy_count_preference, relief="flat", font=("Segoe UI", 9, "bold"), padx=9, pady=4)
+        self.enemy_count_toggle.pack(anchor="w", pady=(0, 14))
 
         self._surface_label(form, "DIFFICULTY TARGET").pack(anchor="w")
         self.difficulty_name = ttk.Label(form, style="Capacity.TLabel")
@@ -214,6 +227,23 @@ class EncounterForgeApp(tk.Tk):
         self._surface_label(form, "PLAYER LEVELS").pack(anchor="w")
         self.level_frame = tk.Frame(form, background=SURFACE)
         self.level_frame.pack(fill="x", pady=(8, 18))
+        ttk.Separator(form).pack(fill="x", pady=(0, 14))
+        self._surface_label(form, "LOCKED ROSTER").pack(anchor="w")
+        ttk.Label(form, text="Fix creatures first; Forge fills the remaining budget.", style="Surface.TLabel", wraplength=260).pack(anchor="w", pady=(5, 8))
+        self.roster_names = {row[1]: row[0] for row in self.connection.execute("SELECT id, name FROM monsters ORDER BY name")}
+        self.roster_all_names = list(self.roster_names)
+        self.roster_choice = ttk.Combobox(form, values=self.roster_all_names, state="normal", width=28)
+        self.roster_choice.pack(fill="x")
+        self.roster_choice.bind("<KeyRelease>", self._filter_roster_creatures)
+        self.roster_quantity = tk.IntVar(value=1)
+        roster_actions = tk.Frame(form, background=SURFACE)
+        roster_actions.pack(fill="x", pady=(6, 4))
+        ttk.Spinbox(roster_actions, from_=1, to=20, textvariable=self.roster_quantity, width=5).pack(side="left")
+        ttk.Button(roster_actions, text="Lock creature", style="Secondary.TButton", command=self._add_locked_creature).pack(side="left", padx=(7, 0))
+        ttk.Button(roster_actions, text="Reset roster", style="Secondary.TButton", command=self._reset_locked_roster).pack(side="right")
+        self.roster_status = ttk.Label(form, style="Surface.TLabel", wraplength=260)
+        self.roster_status.pack(anchor="w", pady=(3, 14))
+        self._refresh_locked_roster()
         self.after_idle(self._refresh_sidebar_scrollregion)
 
     def _build_workspace(self, workspace: tk.Frame) -> None:
@@ -342,6 +372,29 @@ class EncounterForgeApp(tk.Tk):
     def _levels(self) -> list[int]:
         return [variable.get() for variable in self.level_vars]
 
+    def _add_locked_creature(self) -> None:
+        name = self.roster_choice.get()
+        if not name:
+            messagebox.showinfo("Choose a creature", "Choose a creature to add to the locked roster.")
+            return
+        monster_id = self.roster_names[name]
+        self.locked_roster[monster_id] = int(self.roster_quantity.get())
+        self._refresh_locked_roster()
+
+    def _filter_roster_creatures(self, _event=None) -> None:
+        query = self.roster_choice.get().casefold().strip()
+        matches = [name for name in self.roster_all_names if query in name.casefold()]
+        self.roster_choice.configure(values=matches[:100] if query else self.roster_all_names)
+
+    def _reset_locked_roster(self) -> None:
+        self.locked_roster.clear()
+        self._refresh_locked_roster()
+
+    def _refresh_locked_roster(self) -> None:
+        names = {monster_id: name for name, monster_id in self.roster_names.items()}
+        text = ", ".join(f"{quantity} x {names[monster_id]}" for monster_id, quantity in self.locked_roster.items())
+        self.roster_status.config(text=text or "No creatures locked.")
+
     def _refresh_capacity(self) -> None:
         try:
             capacity = calculate_party_capacity(self.connection, self._levels(), int(self.slider_value.get()))
@@ -355,8 +408,19 @@ class EncounterForgeApp(tk.Tk):
         count = int(self.enemy_count_preference.get())
         label = "enemy" if count == 1 else "enemies"
         self.enemy_count_hint.config(
-            text=f"Roughly {count} {label} — a preference, not a hard cap"
+            text=(f"Roughly {count} {label} — a preference, not a hard cap" if self.enemy_count_preference_enabled.get() else "No enemy-count preference")
         )
+        enabled = self.enemy_count_preference_enabled.get()
+        self.enemy_count_toggle.config(
+            text="COUNT PREFERENCE ON" if enabled else "COUNT PREFERENCE OFF",
+            background=ACCENT if enabled else SURFACE_LIGHT,
+            foreground="white" if enabled else MUTED,
+            activebackground=ACCENT_HOVER if enabled else SURFACE_SELECTED,
+        )
+
+    def _toggle_enemy_count_preference(self) -> None:
+        self.enemy_count_preference_enabled.set(not self.enemy_count_preference_enabled.get())
+        self._refresh_enemy_count()
 
     def _toggle_variety(self) -> None:
         self.variety_enabled.set(not self.variety_enabled.get())
@@ -427,7 +491,7 @@ class EncounterForgeApp(tk.Tk):
                 self._levels(),
                 slider_value=int(self.slider_value.get()),
                 environment=None if selected_environment == "Any environment" else selected_environment,
-                preferred_enemy_count=int(self.enemy_count_preference.get()),
+                preferred_enemy_count=(int(self.enemy_count_preference.get()) if self.enemy_count_preference_enabled.get() else None),
                 count_influence=int(self.count_influence.get()),
                 grouping_bias=self.grouping_bias.get(),
                 max_distinct_creatures=(
@@ -435,6 +499,7 @@ class EncounterForgeApp(tk.Tk):
                 ),
                 include_unprofiled=self.include_unprofiled.get(),
                 include_missing_xp=self.include_missing_xp.get(),
+                locked_monsters=self.locked_roster,
                 max_members=min(20, max(6, int(self.enemy_count_preference.get()) + 3)),
             )
         except (ValueError, sqlite3.Error) as error:
