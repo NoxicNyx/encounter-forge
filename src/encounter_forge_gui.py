@@ -8,7 +8,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from encounter_difficulty import assess_encounter, calculate_party_capacity
 from encounter_generator import EncounterRecommendation, generate_encounters, save_recommendation
@@ -20,6 +20,12 @@ from database.dependencies.creature_family import (
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+
+
+def asset_path(name: str) -> Path:
+    """Locate bundled visual assets in development and PyInstaller builds."""
+    base = ROOT_DIR if not getattr(sys, "frozen", False) else Path(getattr(sys, "_MEIPASS"))
+    return base / "assets" / name
 
 
 def application_paths() -> tuple[Path, Path, Path]:
@@ -271,6 +277,11 @@ class EncounterForgeApp(tk.Tk):
         self.geometry("1380x860")
         self.minsize(1120, 700)
         self.configure(background=BG)
+        # Tk owns the live window icon independently of the executable's
+        # Explorer icon, so set both the ICO and a retained PNG image.
+        self.iconbitmap(default=str(asset_path("encounter-forge-logo.ico")))
+        self.window_icon = tk.PhotoImage(file=str(asset_path("encounter-forge-logo.png")))
+        self.iconphoto(True, self.window_icon)
         self.connection = sqlite3.connect(DB_PATH)
         self.connection.row_factory = sqlite3.Row
         # Apply additive schema changes so saved encounter settings work with
@@ -279,6 +290,7 @@ class EncounterForgeApp(tk.Tk):
         migrate_family_catalogue(self.connection)
         self.party_size = tk.IntVar(value=4)
         self.slider_value = tk.IntVar(value=50)
+        self.rules_mode = tk.StringVar(value="2024 rules")
         self.enemy_count_preference = tk.IntVar(value=4)
         self.enemy_count_preference_enabled = tk.BooleanVar(value=True)
         self.count_influence = tk.IntVar(value=0)
@@ -296,6 +308,20 @@ class EncounterForgeApp(tk.Tk):
         self._rebuild_player_levels()
         self._refresh_capacity()
         self._refresh_enemy_count()
+
+    def _ruleset_config(self) -> tuple[str, int]:
+        """Return database ruleset and count adjustment for the selected mode."""
+        if self.rules_mode.get() == "2014 rules":
+            return "dnd-2014", 100
+        if self.rules_mode.get() == "Hybrid house rule":
+            return "dnd-2024", int(self.count_influence.get())
+        return "dnd-2024", 0
+
+    def _on_rules_changed(self, _event=None) -> None:
+        is_hybrid = self.rules_mode.get() == "Hybrid house rule"
+        self.count_influence_hint.config(foreground=MUTED if is_hybrid else WARNING)
+        self._refresh_capacity()
+        self._refresh_count_influence()
 
     def destroy(self) -> None:
         self.connection.close()
@@ -357,7 +383,9 @@ class EncounterForgeApp(tk.Tk):
     def _build(self) -> None:
         header = tk.Frame(self, background=BG)
         header.pack(fill="x", padx=32, pady=(26, 18))
-        emblem = tk.Label(header, text="EF", background=ACCENT, foreground="white", font=("Segoe UI", 11, "bold"), width=3, height=1)
+        self.logo_source = tk.PhotoImage(file=str(asset_path("encounter-forge-logo.png")))
+        self.logo_image = self.logo_source.subsample(20, 20)
+        emblem = tk.Label(header, image=self.logo_image, background=BG, width=58, height=58)
         emblem.pack(side="left", padx=(0, 12))
         title_box = tk.Frame(header, background=BG)
         title_box.pack(side="left")
@@ -418,6 +446,12 @@ class EncounterForgeApp(tk.Tk):
         self._surface_label(form, "ENVIRONMENT").pack(anchor="w")
         environments = ["Any environment"] + [row[0] for row in self.connection.execute("SELECT name FROM environments ORDER BY name")]
         ttk.Combobox(form, textvariable=self.environment_var, values=environments, state="readonly", width=28).pack(fill="x", pady=(5, 16))
+
+        self._surface_label(form, "DIFFICULTY RULESET").pack(anchor="w")
+        rules = ttk.Combobox(form, textvariable=self.rules_mode,
+            values=("2024 rules", "2014 rules", "Hybrid house rule"), state="readonly", width=28)
+        rules.pack(fill="x", pady=(5, 16))
+        rules.bind("<<ComboboxSelected>>", self._on_rules_changed)
 
         self._surface_label(form, "ENEMY COUNT").pack(anchor="w")
         self.enemy_count_hint = ttk.Label(form, style="Surface.TLabel", wraplength=255, justify="left")
@@ -563,6 +597,11 @@ class EncounterForgeApp(tk.Tk):
         detail_header = tk.Frame(workspace, background=BG)
         detail_header.pack(fill="x", pady=(20, 10))
         ttk.Label(detail_header, text="Tactical playbook", style="Section.TLabel").pack(side="left")
+        ttk.Button(detail_header, text="Data health", style="Secondary.TButton", command=self._show_data_health).pack(side="right", padx=(6, 0))
+        ttk.Button(detail_header, text="Saved", style="Secondary.TButton", command=self._show_saved).pack(side="right", padx=(6, 0))
+        ttk.Button(detail_header, text="Export", style="Secondary.TButton", command=self._export_selected).pack(side="right", padx=(6, 0))
+        ttk.Button(detail_header, text="Lock selected", style="Secondary.TButton", command=self._lock_selected).pack(side="right", padx=(6, 0))
+        ttk.Button(detail_header, text="Next option", style="Secondary.TButton", command=self._next_option).pack(side="right", padx=(6, 0))
         ttk.Button(detail_header, text="Save selected", style="Secondary.TButton", command=self._save_selected).pack(side="right")
         detail_box = tk.Frame(workspace, background=SURFACE, highlightbackground=BORDER, highlightthickness=1)
         detail_box.pack(fill="both", expand=True)
@@ -631,12 +670,13 @@ class EncounterForgeApp(tk.Tk):
             )
             return
         try:
+            ruleset_key, effective_count = self._ruleset_config()
             assessment = assess_encounter(
                 self.connection,
                 self._levels(),
                 list(self.locked_roster.items()),
                 slider_value=int(self.slider_value.get()),
-                count_influence=int(self.count_influence.get()),
+                count_influence=effective_count, ruleset_key=ruleset_key,
             )
         except (ValueError, sqlite3.Error) as error:
             self.roster_status.config(text=f"{text}\nXP unavailable: {error}")
@@ -675,7 +715,8 @@ class EncounterForgeApp(tk.Tk):
 
     def _refresh_capacity(self) -> None:
         try:
-            capacity = calculate_party_capacity(self.connection, self._levels(), int(self.slider_value.get()))
+            ruleset_key, _ = self._ruleset_config()
+            capacity = calculate_party_capacity(self.connection, self._levels(), int(self.slider_value.get()), ruleset_key)
             self.difficulty_name.config(text=f"{capacity.requested_label} · {capacity.requested_budget_xp:,.0f} XP")
             self.difficulty_hint.config(text=f"Low {capacity.low_xp:,.0f}  |  Moderate {capacity.moderate_xp:,.0f}  |  High {capacity.high_xp:,.0f}")
         except ValueError as error:
@@ -759,8 +800,8 @@ class EncounterForgeApp(tk.Tk):
             )
 
     def _refresh_count_influence(self) -> None:
-        influence = int(self.count_influence.get())
-        text = "2024 base XP" if influence == 0 else f"{influence}% 2014 action economy"
+        ruleset_key, influence = self._ruleset_config()
+        text = "Official 2014 multiplier" if ruleset_key == "dnd-2014" else ("2024 base XP" if influence == 0 else f"{influence}% 2014 action economy")
         self.count_influence_hint.config(text=text)
 
     def _force_locked_encounter(self) -> None:
@@ -769,13 +810,14 @@ class EncounterForgeApp(tk.Tk):
     def _generate(self, force_locked: bool = False) -> None:
         try:
             selected_environment = self.environment_var.get()
+            ruleset_key, effective_count = self._ruleset_config()
             generation = generate_encounters(
                 self.connection,
                 self._levels(),
                 slider_value=int(self.slider_value.get()),
                 environment=None if selected_environment == "Any environment" else selected_environment,
                 preferred_enemy_count=(int(self.enemy_count_preference.get()) if self.enemy_count_preference_enabled.get() else None),
-                count_influence=int(self.count_influence.get()),
+                count_influence=effective_count, ruleset_key=ruleset_key,
                 grouping_bias=self.grouping_bias.get(),
                 max_distinct_creatures=(
                     int(self.variety_limit.get()) if self.variety_enabled.get() else None
@@ -829,6 +871,10 @@ class EncounterForgeApp(tk.Tk):
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(tk.END, "ENCOUNTER PLAN\n", "section")
         self.detail_text.insert(tk.END, recommendation.explanation + "\n", "good")
+        party = recommendation.assessment.party
+        self.detail_text.insert(tk.END, "DIFFICULTY BREAKDOWN\n", "section")
+        self.detail_text.insert(tk.END, f"{recommendation.ruleset_key.replace('dnd-', 'D&D ')} · party budgets: Low {party.low_xp:,.0f}, Moderate {party.moderate_xp:,.0f}, High {party.high_xp:,.0f} XP.\n")
+        self.detail_text.insert(tk.END, f"Base monster XP {recommendation.assessment.base_monster_xp:,.0f} × stat factor {recommendation.assessment.stat_adjustment_factor:.2f} × count factor {recommendation.assessment.action_economy_factor:.2f} = {recommendation.assessment.adjusted_monster_threat_xp:,.0f} adjusted XP.\n")
         if recommendation.preferred_enemy_count is not None:
             self.detail_text.insert(
                 tk.END,
@@ -932,9 +978,61 @@ class EncounterForgeApp(tk.Tk):
             environment_id = self.connection.execute(
                 "SELECT id FROM environments WHERE name = ?", (self.environment_var.get(),)
             ).fetchone()[0]
+        name = simpledialog.askstring("Save encounter", "Name this encounter:", parent=self)
+        if not name:
+            return
         result_id = save_recommendation(self.connection, self.recommendations[int(selection[0])], environment_id)
-        self.status_label.config(text=f"Saved encounter #{result_id}.")
+        self.connection.execute("INSERT INTO saved_encounters (encounter_result_id, name) VALUES (?, ?)", (result_id, name.strip()))
+        self.connection.commit()
+        self.status_label.config(text=f"Saved: {name.strip()}.")
         self.header_status.config(text="SAVED", background="#243957", foreground=WARNING)
+
+    def _selected_recommendation(self):
+        selection = self.result_tree.selection()
+        return self.recommendations[int(selection[0])] if selection else None
+
+    def _next_option(self) -> None:
+        if not self.recommendations:
+            self._generate()
+            return
+        current = int(self.result_tree.selection()[0]) if self.result_tree.selection() else -1
+        self.result_tree.selection_set(str((current + 1) % len(self.recommendations)))
+        self._show_recommendation()
+
+    def _lock_selected(self) -> None:
+        recommendation = self._selected_recommendation()
+        if recommendation is None:
+            messagebox.showinfo("Select an encounter", "Choose a recommendation to make it your locked roster.")
+            return
+        self.locked_roster = {threat.monster_id: threat.quantity for threat in recommendation.assessment.monsters}
+        self._refresh_locked_roster()
+        self.status_label.config(text="Selected encounter locked. Adjust it or generate around it.")
+
+    def _export_selected(self) -> None:
+        recommendation = self._selected_recommendation()
+        if recommendation is None:
+            messagebox.showinfo("Select an encounter", "Choose a recommendation before exporting it.")
+            return
+        path = filedialog.asksaveasfilename(parent=self, title="Export encounter", defaultextension=".txt", filetypes=[("Text file", "*.txt")], initialfile="encounter-forge-encounter.txt")
+        if not path:
+            return
+        lines = ["ENCOUNTER FORGE", recommendation.explanation, "", "TACTICAL PLAYBOOK"]
+        for plan in recommendation.creature_plans:
+            lines += [f"\n{plan.quantity} x {plan.name}", plan.tactical_summary]
+            lines += [f"Attack: {attack.name} — {attack.damage}" for attack in plan.attacks]
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        self.status_label.config(text=f"Exported {Path(path).name}.")
+
+    def _show_saved(self) -> None:
+        rows = self.connection.execute("SELECT name, created_at FROM saved_encounters ORDER BY id DESC LIMIT 30").fetchall()
+        messagebox.showinfo("Saved encounters", "\n".join(f"• {row[0]} — {row[1]}" for row in rows) or "No saved encounters yet.")
+
+    def _show_data_health(self) -> None:
+        total = self.connection.execute("SELECT COUNT(*) FROM monsters").fetchone()[0]
+        profiled = self.connection.execute("SELECT COUNT(DISTINCT monster_id) FROM tactical_profile_monster_links").fetchone()[0]
+        sourced = self.connection.execute("SELECT COUNT(*) FROM curated_profile_monster_mappings").fetchone()[0]
+        missing_xp = self.connection.execute("SELECT COUNT(*) FROM monsters WHERE experience_points IS NULL").fetchone()[0]
+        messagebox.showinfo("Data health", f"Catalogue: {total} creatures\nTactical-profile links: {profiled}\nCurated source-backed mappings: {sourced}\nMissing published XP: {missing_xp}\n\nUse Data Coverage controls to deliberately include incomplete records.")
 
 
 if __name__ == "__main__":

@@ -694,6 +694,40 @@ SELECT id, 0, 'Low', 'low_xp' FROM difficulty_rulesets WHERE ruleset_key = 'dnd-
 INSERT OR IGNORE INTO difficulty_slider_anchors SELECT id, 50, 'Moderate', 'moderate_xp' FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2024';
 INSERT OR IGNORE INTO difficulty_slider_anchors SELECT id, 100, 'High', 'high_xp' FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2024';
 
+INSERT OR IGNORE INTO difficulty_rulesets (ruleset_key, name, source_url) VALUES
+('dnd-2014', 'Dungeons & Dragons 2014 encounter thresholds', 'https://www.dndbeyond.com/sources/dnd/basic-rules-2014/building-combat-encounters');
+INSERT OR IGNORE INTO player_level_difficulty_budgets (difficulty_ruleset_id, player_level, low_xp, moderate_xp, high_xp)
+SELECT id, 1, 25, 50, 75 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 2, 50, 100, 150 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 3, 75, 150, 225 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 4, 125, 250, 375 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 5, 250, 500, 750 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 6, 300, 600, 900 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 7, 350, 750, 1100 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 8, 450, 900, 1400 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 9, 550, 1100, 1600 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 10, 600, 1200, 1900 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 11, 800, 1600, 2400 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 12, 1000, 2000, 3000 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 13, 1100, 2200, 3400 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 14, 1250, 2500, 3800 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 15, 1400, 2800, 4300 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 16, 1600, 3200, 4800 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 17, 2000, 3900, 5900 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 18, 2100, 4200, 6300 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 19, 2400, 4900, 7300 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO player_level_difficulty_budgets SELECT id, 20, 2800, 5700, 8500 FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO difficulty_slider_anchors (difficulty_ruleset_id, slider_value, label, budget_column)
+SELECT id, 0, 'Easy', 'low_xp' FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO difficulty_slider_anchors SELECT id, 50, 'Medium', 'moderate_xp' FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+INSERT OR IGNORE INTO difficulty_slider_anchors SELECT id, 100, 'Hard', 'high_xp' FROM difficulty_rulesets WHERE ruleset_key = 'dnd-2014';
+
+CREATE TABLE IF NOT EXISTS saved_encounters (
+ id INTEGER PRIMARY KEY, encounter_result_id INTEGER NOT NULL UNIQUE, name TEXT NOT NULL,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY (encounter_result_id) REFERENCES encounter_results(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_monsters_challenge_rating
     ON monsters (challenge_rating);
 

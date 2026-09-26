@@ -52,6 +52,7 @@ class EncounterRecommendation:
     relationship_notes: tuple[str, ...]
     creature_plans: tuple["CreaturePlan", ...]
     explanation: str
+    ruleset_key: str = "dnd-2024"
 
 
 @dataclass(frozen=True)
@@ -634,6 +635,7 @@ def _recommendations_from_states(
     include_missing_xp: bool,
     limit: int,
     forced_locked_roster: bool = False,
+    ruleset_key: str = "dnd-2024",
 ) -> tuple[EncounterRecommendation, ...]:
     scored = []
     for state in states:
@@ -673,6 +675,7 @@ def _recommendations_from_states(
                 for candidate in candidates
                 if candidate.uses_inferred_xp
             },
+            ruleset_key=ruleset_key,
         )
         description = ", ".join(
             f"{threat.quantity} x {threat.name}" for threat in assessment.monsters
@@ -707,6 +710,7 @@ def _recommendations_from_states(
             notes,
             _creature_plans(connection, assessment),
             explanation,
+            ruleset_key,
         )
         chosen.append(recommendation)
         chosen_compositions.append(composition)
@@ -731,6 +735,7 @@ def generate_encounters(
     limit: int = 5,
     max_members: int = 6,
     max_candidates: int = 70,
+    ruleset_key: str = "dnd-2024",
 ) -> EncounterGeneration:
     """Return several budget-fitting, diverse encounter recommendations.
 
@@ -755,14 +760,17 @@ def generate_encounters(
     locked_monsters = locked_monsters or {}
     if any(not isinstance(monster_id, int) or not isinstance(quantity, int) or quantity < 1 for monster_id, quantity in locked_monsters.items()):
         raise ValueError("Locked roster entries must use a monster id and a positive whole quantity.")
-    capacity = calculate_party_capacity(connection, player_levels, slider_value)
+    if ruleset_key not in {"dnd-2024", "dnd-2014"}:
+        raise ValueError("Ruleset must be dnd-2024 or dnd-2014.")
+    effective_count_influence = 100 if ruleset_key == "dnd-2014" else count_influence
+    capacity = calculate_party_capacity(connection, player_levels, slider_value, ruleset_key)
     locked_threat = 0.0
     if locked_monsters:
         locked_threat = sum(
             threat.adjusted_xp
             for threat in calculate_monster_threats(connection, list(locked_monsters.items()))
         ) * action_economy_factor(
-            sum(locked_monsters.values()), len(player_levels), count_influence
+            sum(locked_monsters.values()), len(player_levels), effective_count_influence
         )
         if locked_threat > capacity.requested_budget_xp and not force_locked:
             return EncounterGeneration(
@@ -780,7 +788,7 @@ def generate_encounters(
         environment,
         grouping_bias,
         len(player_levels),
-        count_influence,
+        effective_count_influence,
         include_unprofiled,
         include_missing_xp,
         max_candidates,
@@ -826,7 +834,7 @@ def generate_encounters(
                 new_state = state + (candidate_index,)
                 threat = sum(candidates[index].adjusted_xp for index in new_state)
                 threat *= action_economy_factor(
-                    len(new_state), len(player_levels), count_influence
+                    len(new_state), len(player_levels), effective_count_influence
                 )
                 if threat <= capacity.requested_budget_xp:
                     expanded.append(new_state)
@@ -836,7 +844,7 @@ def generate_encounters(
         expanded.sort(
             key=lambda state: _group_score(
                 state, candidates, capacity.requested_budget_xp, compatibility, relationships,
-                preferred_enemy_count, grouping_bias, len(player_levels), count_influence,
+                preferred_enemy_count, grouping_bias, len(player_levels), effective_count_influence,
             )[0],
             reverse=True,
         )
@@ -852,12 +860,13 @@ def generate_encounters(
         relationships,
         preferred_enemy_count,
         "none" if forced_locked_roster else grouping_bias,
-        count_influence,
+        effective_count_influence,
         max_distinct_creatures,
         include_unprofiled,
         include_missing_xp,
         limit,
         forced_locked_roster,
+        ruleset_key,
     )
     environment_message = (
         f" {environment_matches} candidates have a direct or tactical match for {environment}."
@@ -898,6 +907,7 @@ def save_recommendation(
             "include_unprofiled": recommendation.include_unprofiled,
             "include_missing_xp": recommendation.include_missing_xp,
         },
+        ruleset_key=recommendation.ruleset_key,
     )
     connection.execute(
         "UPDATE encounter_results SET tactical_score = ?, notes = ? WHERE id = ?",

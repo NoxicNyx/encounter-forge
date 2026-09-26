@@ -73,6 +73,13 @@ class DifficultyCalculatorTests(unittest.TestCase):
         self.assertEqual(capacity.requested_budget_xp, 250)
         self.assertEqual(capacity.requested_label, "Moderate")
 
+    def test_2014_ruleset_uses_its_own_thresholds(self):
+        capacity = calculate_party_capacity(self.connection, [1, 1, 1, 1], 100, "dnd-2014")
+        self.assertEqual((capacity.low_xp, capacity.moderate_xp, capacity.high_xp), (100, 200, 300))
+        assessment = assess_encounter(self.connection, [1, 1, 1, 1], [(1, 4)], 100, "dnd-2014", 100)
+        self.assertEqual(assessment.action_economy_factor, 2)
+        self.assertEqual(assessment.assessed_band, "Above High")
+
     def test_monster_xp_is_assessed_against_the_selected_budget(self):
         assessment = assess_encounter(self.connection, [1, 1, 1, 1], [(1, 4)], 0)
 
