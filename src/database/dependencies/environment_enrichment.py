@@ -1,5 +1,8 @@
+import json
+import re
 import sqlite3
-import requests
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 # Open5e API
@@ -10,35 +13,45 @@ version_filter = {
 }
 
 
+def fetch_json(request_url):
+    request = Request(
+        request_url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Encounter-Forge/0.1"
+        }
+    )
+    with urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
 # ---------------------------------------------------------------------------
 # Get 2014 creature environments
 # ---------------------------------------------------------------------------
 
 creature_environments = {}
 
-current_url = url
+
+def name_tokens(value):
+    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def source_name_within_monster(source_name, monster_name):
+    """Allow Goblin's habitats to inform Goblin Warrior, but only by tokens."""
+    source_tokens = name_tokens(source_name)
+    monster_tokens = name_tokens(monster_name)
+    return bool(source_tokens) and any(
+        monster_tokens[index:index + len(source_tokens)] == source_tokens
+        for index in range(len(monster_tokens) - len(source_tokens) + 1)
+    )
+
+current_url = f"{url}?{urlencode(version_filter)}"
 
 
 while current_url is not None:
 
     # Apply the 2014 filter only to the first request
-    if current_url == url:
-
-        response = requests.get(
-            current_url,
-            params=version_filter
-        )
-
-    # Use the API-provided URL for subsequent pages
-    else:
-
-        response = requests.get(
-            current_url
-        )
-
-    response.raise_for_status()
-
-    data = response.json()
+    data = fetch_json(current_url)
 
 
     # Store environments against each creature name
@@ -93,15 +106,25 @@ monsters = cursor.fetchall()
 # ---------------------------------------------------------------------------
 
 matched = 0
+substring_matched = 0
 unmatched = []
 environment_links = 0
 
 
 for monster_id, monster_name in monsters:
 
-    environments = creature_environments.get(
-        monster_name
-    )
+    environments = creature_environments.get(monster_name)
+
+    if environments is None:
+        inherited_environments = {
+            environment_name
+            for source_name, source_environments in creature_environments.items()
+            if source_name_within_monster(source_name, monster_name)
+            for environment_name in source_environments
+        }
+        if inherited_environments:
+            environments = sorted(inherited_environments)
+            substring_matched += 1
 
 
     # No matching 2014 creature
@@ -182,6 +205,10 @@ connection.close()
 
 print(
     f"Matched: {matched}"
+)
+
+print(
+    f"Substring matched: {substring_matched}"
 )
 
 print(

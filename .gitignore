@@ -1,4 +1,33 @@
-*.db
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# Local database
+*.db
+
+# Build output
+build/
+dist/
+release/
+release-fixed/
+release-tk/
+
+# PyInstaller
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local database
+*.db
+
+# PyInstaller / build output
+build/
+build-*/
+dist/
+release/
+release-*/
+*.spec
